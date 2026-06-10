@@ -3,6 +3,7 @@ package com.dengpeng.coolcast
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 
 class MainActivity : FlutterActivity() {
@@ -10,6 +11,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val wifiManager =
             applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         multicastLock = wifiManager?.createMulticastLock("coolcast-dlna-ssdp")?.apply {

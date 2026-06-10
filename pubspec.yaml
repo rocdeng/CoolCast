@@ -12,6 +12,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   video_player: ^2.9.2
   shared_preferences: ^2.5.5
+  pointycastle: ^4.0.0
 
 dev_dependencies:
   flutter_test:
@@ -20,3 +21,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/cast_waiting_living_room.png

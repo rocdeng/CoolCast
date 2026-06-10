@@ -20,11 +20,20 @@ android {
         targetSdk = 34
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
     }
 
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            excludes += listOf("lib/x86/**", "lib/x86_64/**")
         }
     }
 }
@@ -38,3 +47,30 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+fun registerCoolCastApkCopyTask(buildType: String) {
+    val capitalizedBuildType = buildType.replaceFirstChar { it.uppercase() }
+    val versionName = android.defaultConfig.versionName ?: "dev"
+    val outputDir = rootProject.layout.buildDirectory.dir("app/outputs/flutter-apk")
+
+    tasks.register<Copy>("copyCoolCast${capitalizedBuildType}Apk") {
+        from(layout.buildDirectory.file("outputs/apk/$buildType/app-$buildType.apk"))
+        into(outputDir)
+        rename { "coolcast-ver$versionName-$buildType.apk" }
+        doLast {
+            copy {
+                from(layout.buildDirectory.file("outputs/apk/$buildType/app-$buildType.apk"))
+                into(outputDir)
+            }
+        }
+    }
+
+    afterEvaluate {
+        tasks.named("assemble$capitalizedBuildType") {
+            finalizedBy("copyCoolCast${capitalizedBuildType}Apk")
+        }
+    }
+}
+
+registerCoolCastApkCopyTask("debug")
+registerCoolCastApkCopyTask("release")
