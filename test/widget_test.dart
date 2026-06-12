@@ -713,9 +713,11 @@ void main() {
     final response = coolCastNirvanaFrameResponseForTest(
       Uint8List.sublistView(combined, firstLength),
     );
-    final responseParsed = coolCastNvaFrameForTest(response!);
-    expect(responseParsed!['op'], 0xe004);
-    expect(responseParsed['seq'], 4);
+    expect(response, Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x00, 0x04]));
+    expect(
+      coolCastNirvanaControlSummaryForTest(response!),
+      'native control seq=4 op=0xc000',
+    );
   });
 
   test('Nirvana native frame parser reads command attributes and replies', () {
@@ -738,13 +740,14 @@ void main() {
     );
 
     final response = coolCastNirvanaFrameResponseForTest(request);
-    final responseParsed = coolCastNvaFrameForTest(response!);
-    expect(responseParsed, isNotNull);
-    expect(responseParsed!['op'], 0xe004);
-    expect(responseParsed['seq'], 42);
-    expect(responseParsed['isRequest'], isFalse);
-    expect(responseParsed['attributes'], isEmpty);
-    expect(responseParsed['body'], isEmpty);
+    expect(
+      response,
+      Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x00, 0x2a]),
+    );
+    expect(
+      coolCastNirvanaControlSummaryForTest(response!),
+      'native control seq=42 op=0xc000',
+    );
   });
 
   test('Nirvana native frame parser matches captured Play frame format', () {
@@ -801,15 +804,17 @@ void main() {
 
     final tvInfoResponse = coolCastNirvanaFrameResponseForTest(getTvInfo);
     final parsedTvInfoResponse = coolCastNvaFrameForTest(tvInfoResponse!);
-    expect(parsedTvInfoResponse!['op'], 0xe004);
+    expect(parsedTvInfoResponse!['op'], 0xc003);
     expect(parsedTvInfoResponse['seq'], 2);
     expect(parsedTvInfoResponse['body'], contains('"tvVipInfo":-1'));
+    expect(coolCastNirvanaFrameResponsesForTest(getTvInfo), tvInfoResponse);
 
     final volumeResponse = coolCastNirvanaFrameResponseForTest(getVolume);
     final parsedVolumeResponse = coolCastNvaFrameForTest(volumeResponse!);
-    expect(parsedVolumeResponse!['op'], 0xe004);
+    expect(parsedVolumeResponse!['op'], 0xc003);
     expect(parsedVolumeResponse['seq'], 3);
     expect(parsedVolumeResponse['body'], contains('"volume":50'));
+    expect(coolCastNirvanaFrameResponsesForTest(getVolume), volumeResponse);
 
     final getPlayInfo = coolCastNvaEmptyRequestFrameForTest(
       4,
@@ -817,12 +822,13 @@ void main() {
     );
     final playInfoResponse = coolCastNirvanaFrameResponseForTest(getPlayInfo);
     final parsedPlayInfoResponse = coolCastNvaFrameForTest(playInfoResponse!);
-    expect(parsedPlayInfoResponse!['op'], 0xe004);
+    expect(parsedPlayInfoResponse!['op'], 0xc003);
     expect(parsedPlayInfoResponse['seq'], 4);
     expect(parsedPlayInfoResponse['attributes'], isEmpty);
     expect(parsedPlayInfoResponse['body'], contains('"playState":'));
     expect(parsedPlayInfoResponse['body'], contains('"duration":'));
     expect(parsedPlayInfoResponse['body'], contains('"volume":50'));
+    expect(coolCastNirvanaFrameResponsesForTest(getPlayInfo), playInfoResponse);
   });
 
   test('Bilibili play info response follows official nvalink status shape', () {
@@ -834,7 +840,7 @@ void main() {
       acceptQuality: const [120, 112, 80, 64],
     )) as Map<String, Object?>;
 
-    expect(body['playState'], 2);
+    expect(body['playState'], 4);
     expect(body['position'], 0);
     expect(body['duration'], 2666);
     expect(body['danmakuState'], isTrue);
@@ -864,6 +870,16 @@ void main() {
     final speedInfo = body['speedInfo'] as Map<String, Object?>;
     expect(speedInfo['currSpeed'], 1.0);
     expect(speedInfo['supportSpeedList'], contains(2.0));
+
+    final pausedBody = jsonDecode(coolCastBiliPlayInfoResponseForTest(
+      aid: 116621666555985,
+      cid: 26016292374,
+      quality: 120,
+      timelength: 2665726,
+      acceptQuality: const [120, 112, 80, 64],
+      playState: 5,
+    )) as Map<String, Object?>;
+    expect(pausedBody['playState'], 5);
   });
 
   test('Bilibili active status events use native request command frames', () {
@@ -878,6 +894,66 @@ void main() {
     expect(parsed['isRequest'], isTrue);
     expect(parsed['attributes'], {'Command': 'OnProgress'});
     expect(parsed['body'], contains('"duration":2666'));
+
+    final pausedEvent = coolCastNvaServerEventFrameForTest(
+      command: 'OnPlayState',
+      body: '{"playState":5}',
+    );
+    final parsedPausedEvent = coolCastNvaFrameForTest(pausedEvent);
+    expect(parsedPausedEvent!['attributes'], {'Command': 'OnPlayState'});
+    expect(parsedPausedEvent['body'], '{"playState":5}');
+  });
+
+  test('Bilibili native playback control frames parse and ack', () {
+    final pause = coolCastNvaEmptyRequestFrameForTest(
+      10,
+      {'Command': 'Pause'},
+    );
+    final resume = coolCastNvaEmptyRequestFrameForTest(
+      11,
+      {'Command': 'Resume'},
+    );
+    final play = coolCastNvaEmptyRequestFrameForTest(
+      14,
+      {'Command': 'Play'},
+    );
+    final seek = coolCastNvaRequestFrameForTest(
+      12,
+      {'Command': 'Seek'},
+      '{"position":88}',
+    );
+    final stop = coolCastNvaEmptyRequestFrameForTest(
+      13,
+      {'Command': 'Stop'},
+    );
+
+    expect(coolCastNvaFrameForTest(pause)!['attributes'], {'Command': 'Pause'});
+    expect(coolCastNvaFrameForTest(resume)!['attributes'], {
+      'Command': 'Resume',
+    });
+    expect(coolCastNvaFrameForTest(play)!['attributes'], {'Command': 'Play'});
+    expect(coolCastNvaFrameForTest(seek)!['body'], '{"position":88}');
+    expect(coolCastNvaFrameForTest(stop)!['attributes'], {'Command': 'Stop'});
+    expect(coolCastBiliNvaControlForTest('Seek', '{"position":88}'), {
+      'command': 'Seek',
+      'seekSeconds': 88,
+    });
+
+    final pauseResponse = coolCastNirvanaFrameResponseForTest(pause);
+    final playResponse = coolCastNirvanaFrameResponseForTest(play);
+    final seekResponse = coolCastNirvanaFrameResponseForTest(seek);
+    final parsedPauseResponse = coolCastNvaFrameForTest(pauseResponse!);
+    final parsedPlayResponse = coolCastNvaFrameForTest(playResponse!);
+    final parsedSeekResponse = coolCastNvaFrameForTest(seekResponse!);
+    expect(pauseResponse,
+        Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x00, 0x0a]));
+    expect(
+        playResponse, Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x00, 0x0e]));
+    expect(
+        seekResponse, Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x00, 0x0c]));
+    expect(parsedPauseResponse, isNull);
+    expect(parsedPlayResponse, isNull);
+    expect(parsedSeekResponse, isNull);
   });
 
   test('Bilibili NVA Play body builds tv playurl request', () {
