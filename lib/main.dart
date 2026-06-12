@@ -48,6 +48,7 @@ const int _biliNirvanaEmptyRequestOp = 0xe002;
 const int _biliNirvanaResponseOp = 0xe004;
 const int _biliNirvanaHeartbeatRequestOp = 0xe400;
 const int _biliNirvanaHeartbeatResponseOp = 0xe401;
+const int _biliNirvanaShortControlOp = 0xc000;
 const int _ottBlinkPort = 8100;
 const int _nirvanaControlPort = 9958;
 const String _biliDescriptionPath = '/bilibili/description.xml';
@@ -182,6 +183,7 @@ class _BiliCastStatus {
 }
 
 _BiliCastStatus? _latestBiliCastStatus;
+_BiliNvaPlayRequest? _latestBiliNvaPlayRequest;
 final Set<Socket> _biliNvaSessions = <Socket>{};
 int _biliNvaServerSequence = 1000;
 
@@ -685,7 +687,10 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         buffer.addAll(chunk);
         while (buffer.isNotEmpty) {
           final isLikelyText = _looksLikeTextNirvanaPayload(buffer);
-          final frameLength = isLikelyText ? null : _nvaFrameLength(buffer);
+          final frameLength = isLikelyText
+              ? null
+              : _nvaFrameLength(buffer) ??
+                  _nirvanaShortControlFrameLength(buffer);
           final isCompleteText = _looksLikeCompleteNirvanaPayload(buffer);
           final shouldFlushUnknown = buffer.length >= 4096;
           if (!isCompleteText && frameLength == null && !shouldFlushUnknown) {
@@ -830,8 +835,14 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       if (nvaFrame.isRequest) {
         if (nvaFrame.attributes['Command'] == 'Play') {
           _latestBiliCastStatus = null;
+          _latestBiliNvaPlayRequest = null;
           _debugLog('B站状态缓存已清空：收到新的 Play');
           unawaited(_acceptBiliNvaPlay(
+            nvaFrame.bodyText,
+            requester: requester,
+          ));
+        } else if (nvaFrame.attributes['Command'] == 'SwitchQn') {
+          unawaited(_switchBiliNvaQn(
             nvaFrame.bodyText,
             requester: requester,
           ));
@@ -902,6 +913,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
 
     _debugLog('B站 playurl OK for $requester: ${_shortUrl(result.url!)}');
+    _latestBiliNvaPlayRequest = play;
     _latestBiliCastStatus = result.status;
     if (result.status != null) {
       _debugLog('B站状态已缓存: ${result.status!.toJson()}');
@@ -917,8 +929,70 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     );
   }
 
-  Future<void> _sendBiliPlaybackStatusEvents(_BiliCastStatus status) async {
+  Future<void> _switchBiliNvaQn(
+    String body, {
+    required String requester,
+  }) async {
+    final qn = _biliSwitchQnFromBody(body);
+    final latestPlay = _latestBiliNvaPlayRequest;
+    if (qn == null || latestPlay == null) {
+      _debugLog(
+        'B站 SwitchQn from $requester ignored: qn=${qn ?? '-'} '
+        'hasPlay=${latestPlay != null}',
+      );
+      return;
+    }
+
+    final player = _player;
+    final position = player?.value.isInitialized == true
+        ? player!.value.position
+        : Duration.zero;
+    final play = latestPlay.copyWith(
+      qn: qn,
+      userDesireQn: qn,
+      seekTs: position.inSeconds,
+    );
+    _debugLog(
+      'B站 SwitchQn from $requester: qn=$qn '
+      'position=${position.inSeconds}s',
+    );
+    _recordNirvanaControl(requester, 'SwitchQn $qn');
+
+    final result = await _fetchBiliPlayUrl(play);
+    if (result.url == null) {
+      final message = result.error ?? 'B站 SwitchQn 未返回可播放地址';
+      _debugLog('B站 SwitchQn failed for $requester: $message');
+      _recordNirvanaControl(requester, message);
+      if (mounted) {
+        _addDebugAlert('ERR', message);
+      }
+      return;
+    }
+
+    _latestBiliNvaPlayRequest = play;
+    _latestBiliCastStatus = result.status;
+    final status = result.status;
+    if (status != null) {
+      _debugLog('B站 SwitchQn 状态已缓存: ${status.toJson()}');
+      unawaited(_sendBiliPlaybackStatusEvents(status, position: position));
+    }
+    _recordNirvanaControl(requester, 'SwitchQn ${_shortUrl(result.url!)}');
+    unawaited(
+      _acceptUrl(
+        result.url!,
+        source: 'B站 NVA $requester',
+        httpHeaders: _biliPlaybackHeaders(bvid: play.bvid, aid: play.aid),
+        initialPosition: position,
+      ),
+    );
+  }
+
+  Future<void> _sendBiliPlaybackStatusEvents(
+    _BiliCastStatus status, {
+    Duration position = Duration.zero,
+  }) async {
     final durationSeconds = ((status.timelength ?? 0) / 1000).round();
+    final positionSeconds = position.inSeconds;
     final events = <Uint8List>[
       _nvaServerEventFrame(
         command: 'OnPlayState',
@@ -927,7 +1001,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       _nvaServerEventFrame(
         command: 'OnProgress',
         body: jsonEncode({
-          'position': 0,
+          'position': positionSeconds,
           'duration': durationSeconds,
         }),
       ),
@@ -942,7 +1016,8 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     final sessions = _biliNvaSessions.toList(growable: false);
     _debugLog(
       'B站主动状态事件: sessions=${sessions.length} '
-      'duration=$durationSeconds quality=${status.quality ?? '-'}',
+      'position=$positionSeconds duration=$durationSeconds '
+      'quality=${status.quality ?? '-'}',
     );
     for (final session in sessions) {
       try {
@@ -1239,6 +1314,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     required String source,
     CoolCastMediaInfo mediaInfo = const CoolCastMediaInfo(),
     Map<String, String> httpHeaders = const {},
+    Duration initialPosition = Duration.zero,
   }) async {
     if (!_isValidCastUrl(value)) {
       setState(() {
@@ -1275,6 +1351,16 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     try {
       await player.initialize();
       await player.setVolume(_isMuted ? 0 : _volume);
+      if (initialPosition > Duration.zero) {
+        await player.seekTo(initialPosition);
+      }
+      final urlQuality = _qualityLabelFromUrl(value);
+      _debugLog(
+        '$source 播放器已初始化: url=${_shortUrl(value)} '
+        'urlQuality=${urlQuality.isEmpty ? '-' : urlQuality} '
+        'videoSize=${_videoSizeSummary(player.value.size)} '
+        'biliQuality=${_latestBiliCastStatus?.quality ?? '-'}',
+      );
       await oldPlayer?.dispose();
       await player.play();
       setState(() {
@@ -1637,7 +1723,13 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   List<String> _currentMediaChips(VideoPlayerValue? value) =>
       _playingPreviewVisible
           ? const ['4K HDR', 'HEVC', '5.1 Audio']
-          : _mediaChipsFor(_currentUrl, _currentMimeType, _state, value?.size);
+          : _mediaChipsFor(
+              _currentUrl,
+              _currentMimeType,
+              _state,
+              value?.size,
+              biliStatus: _latestBiliCastStatus,
+            );
 
   String get _homeConnectionStatus {
     if (_state == PlaybackState.failed) {
@@ -3707,15 +3799,53 @@ Map<String, Object?>? coolCastBiliNvaPlayForTest(String body) {
 }
 
 @visibleForTesting
+Map<String, Object?>? coolCastBiliNvaSwitchQnForTest(
+  String playBody,
+  String switchBody,
+) {
+  final play = _BiliNvaPlayRequest.fromBody(playBody);
+  final qn = _biliSwitchQnFromBody(switchBody);
+  if (play == null || qn == null) {
+    return null;
+  }
+  final next = play.copyWith(qn: qn, userDesireQn: qn, seekTs: 42);
+  return {
+    'qn': next.qn,
+    'userDesireQn': next.userDesireQn,
+    'preferredQn': next.preferredQn,
+    'preferredPublicQn': next.preferredPublicQn,
+    'seekTs': next.seekTs,
+  };
+}
+
+@visibleForTesting
 Uri? coolCastBiliTvPlayUrlUriForTest(String body) {
   final play = _BiliNvaPlayRequest.fromBody(body);
   return play == null ? null : _biliTvPlayUrlUri(play);
 }
 
 @visibleForTesting
+Uri? coolCastBiliSwitchedTvPlayUrlUriForTest(String body, int qn) {
+  final play = _BiliNvaPlayRequest.fromBody(body);
+  return play == null
+      ? null
+      : _biliTvPlayUrlUri(play.copyWith(qn: qn, userDesireQn: qn));
+}
+
+@visibleForTesting
 Uri? coolCastBiliPublicPlayerPlayUrlUriForTest(String body) {
   final play = _BiliNvaPlayRequest.fromBody(body);
   return play == null ? null : _biliPublicPlayerPlayUrlUri(play);
+}
+
+@visibleForTesting
+Uri? coolCastBiliSwitchedPublicPlayerPlayUrlUriForTest(String body, int qn) {
+  final play = _BiliNvaPlayRequest.fromBody(body);
+  return play == null
+      ? null
+      : _biliPublicPlayerPlayUrlUri(
+          play.copyWith(qn: qn, userDesireQn: qn),
+        );
 }
 
 @visibleForTesting
@@ -3772,6 +3902,10 @@ Uint8List coolCastNirvanaPingFrameForTest(int sequence) =>
 
 Uint8List? coolCastNirvanaFrameResponseForTest(Uint8List data) =>
     _nirvanaFrameResponse(data);
+
+@visibleForTesting
+int? coolCastNirvanaFrameLengthForTest(List<int> data) =>
+    _nvaFrameLength(data) ?? _nirvanaShortControlFrameLength(data);
 
 @visibleForTesting
 String coolCastBiliPlayInfoResponseForTest({
@@ -3859,8 +3993,23 @@ List<String> coolCastMediaChipsForTest({
   required String mimeType,
   required PlaybackState state,
   Size? videoSize,
+  int? biliQuality,
 }) =>
-    _mediaChipsFor(currentUrl, mimeType, state, videoSize);
+    _mediaChipsFor(
+      currentUrl,
+      mimeType,
+      state,
+      videoSize,
+      biliStatus: biliQuality == null
+          ? null
+          : _BiliCastStatus(
+              aid: null,
+              cid: null,
+              quality: biliQuality,
+              timelength: null,
+              acceptQuality: const [],
+            ),
+    );
 
 String _htmlForm({
   required String receiverName,
@@ -4499,6 +4648,32 @@ class _BiliNvaPlayRequest {
     return accessKey.isEmpty ? preferredQn : _biliProjectionMaxQn;
   }
 
+  _BiliNvaPlayRequest copyWith({
+    int? qn,
+    int? userDesireQn,
+    int? seekTs,
+  }) {
+    return _BiliNvaPlayRequest(
+      raw: {
+        ...raw,
+        if (qn != null) 'qn': qn,
+        if (userDesireQn != null) 'userDesireQn': userDesireQn,
+        if (seekTs != null) 'seekTs': seekTs,
+      },
+      aid: aid,
+      cid: cid,
+      accessKey: accessKey,
+      qn: qn ?? this.qn,
+      userDesireQn: userDesireQn ?? this.userDesireQn,
+      contentType: contentType,
+      seasonId: seasonId,
+      epId: epId,
+      seekTs: seekTs ?? this.seekTs,
+      mobileVersion: mobileVersion,
+      bvid: bvid,
+    );
+  }
+
   static _BiliNvaPlayRequest? fromBody(String body) {
     final decoded = _tryJsonDecode(body);
     if (decoded is! Map) {
@@ -4530,6 +4705,16 @@ class _BiliNvaPlayRequest {
       bvid: _findBvidInJson(raw),
     );
   }
+}
+
+int? _biliSwitchQnFromBody(String body) {
+  final decoded = _tryJsonDecode(body);
+  if (decoded is! Map) {
+    return null;
+  }
+  return _jsonInt(decoded['qn']) ??
+      _jsonInt(decoded['quality']) ??
+      _jsonInt(decoded['userDesireQn']);
 }
 
 class _BiliPlayUrlResult {
@@ -4746,11 +4931,13 @@ String? _findUrlInBiliPlayUrl(Object? value) {
   if (map == null) {
     return null;
   }
-  for (final key in const ['durl', 'url', 'dash']) {
-    final url = _findUrlInBiliPlayUrl(map[key]);
-    if (url != null) {
-      return url;
-    }
+  final directUrl = _findDirectBiliPlayUrl(map);
+  if (directUrl != null) {
+    return directUrl;
+  }
+  final dashUrl = _findBiliDashUrl(map['dash'], _jsonInt(map['quality']));
+  if (dashUrl != null) {
+    return dashUrl;
   }
   for (final item in map.values) {
     final url = _findUrlInBiliPlayUrl(item);
@@ -4759,6 +4946,47 @@ String? _findUrlInBiliPlayUrl(Object? value) {
     }
   }
   return null;
+}
+
+String? _findDirectBiliPlayUrl(Map<String, Object?> map) {
+  for (final key in const ['durl', 'url', 'baseUrl', 'base_url']) {
+    final url = _findUrlInBiliPlayUrl(map[key]);
+    if (url != null) {
+      return url;
+    }
+  }
+  return null;
+}
+
+String? _findBiliDashUrl(Object? value, int? quality) {
+  final dash = _jsonMap(value);
+  if (dash == null) {
+    return null;
+  }
+  final videos = dash['video'];
+  if (videos is List) {
+    if (quality != null) {
+      for (final item in videos) {
+        final map = _jsonMap(item);
+        if (map != null && _jsonInt(map['id']) == quality) {
+          final url = _findDirectBiliPlayUrl(map);
+          if (url != null) {
+            return url;
+          }
+        }
+      }
+    }
+    for (final item in videos) {
+      final map = _jsonMap(item);
+      if (map != null) {
+        final url = _findDirectBiliPlayUrl(map);
+        if (url != null) {
+          return url;
+        }
+      }
+    }
+  }
+  return _findDirectBiliPlayUrl(dash);
 }
 
 int? _biliApiCode(Object? decoded) => _jsonInt(_jsonMap(decoded)?['code']);
@@ -4881,6 +5109,10 @@ String _nirvanaControlSummary(Uint8List data) {
   if (heartbeatSummary != null) {
     return heartbeatSummary;
   }
+  final shortControlSummary = _nirvanaShortControlFrameSummary(data);
+  if (shortControlSummary != null) {
+    return shortControlSummary;
+  }
   return 'hex ${data.take(32).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(' ')}';
 }
 
@@ -4924,6 +5156,12 @@ int? _nvaFrameLength(List<int> data) {
   if (data.length < 7) {
     return null;
   }
+  final op = _readUint16(data, 0);
+  if (op != _biliNirvanaRequestOp &&
+      op != _biliNirvanaEmptyRequestOp &&
+      op != _biliNirvanaResponseOp) {
+    return null;
+  }
   var offset = 6;
   final attrCount = data[offset];
   offset += 1;
@@ -4939,7 +5177,6 @@ int? _nvaFrameLength(List<int> data) {
     }
     offset += 1 + valueLength;
   }
-  final op = _readUint16(data, 0);
   if (op == _biliNirvanaEmptyRequestOp) {
     return offset;
   }
@@ -4951,6 +5188,14 @@ int? _nvaFrameLength(List<int> data) {
     return null;
   }
   return offset + 4 + bodyLength;
+}
+
+int? _nirvanaShortControlFrameLength(List<int> data) {
+  if (data.length < 6) {
+    return null;
+  }
+  final op = _readUint16(data, 0);
+  return op == _biliNirvanaShortControlOp ? 6 : null;
 }
 
 int? _nvaStringLength(List<int> data, int offset) {
@@ -5108,6 +5353,17 @@ String? _nirvanaHeartbeatFrameSummary(Uint8List data) {
   final name =
       op == _biliNirvanaHeartbeatRequestOp ? 'heartbeat request' : 'heartbeat';
   return 'native $name seq=$seq op=0x${op.toRadixString(16)} len=$length';
+}
+
+String? _nirvanaShortControlFrameSummary(Uint8List data) {
+  if (_nirvanaShortControlFrameLength(data) != data.length) {
+    return null;
+  }
+  final sequence = _readUint32(data, 2);
+  if (sequence == null) {
+    return null;
+  }
+  return 'native control seq=$sequence op=0xc000';
 }
 
 String? _nativeFrameTextSummary(Uint8List data) {
@@ -5390,6 +5646,8 @@ String _biliQualityDescription(int quality) {
       return '杜比视界';
     case 120:
       return '4K 超清';
+    case 116:
+      return '1080P 60帧';
     case 112:
       return '1080P 高码率';
     case 80:
@@ -5700,9 +5958,14 @@ List<String> _mediaChipsFor(
   String currentUrl,
   String mimeType,
   PlaybackState state,
-  Size? videoSize,
-) {
+  Size? videoSize, {
+  _BiliCastStatus? biliStatus,
+}) {
   final chips = <String>[];
+  final biliQuality = biliStatus?.quality;
+  if (biliQuality != null) {
+    chips.add('B站 ${_biliQualityDescription(biliQuality)}');
+  }
   if (videoSize != null && videoSize.width > 0 && videoSize.height > 0) {
     chips.add(_resolutionLabel(videoSize));
   }
@@ -5720,6 +5983,13 @@ List<String> _mediaChipsFor(
     chips.add('播放中');
   }
   return chips.isEmpty ? const ['媒体已连接'] : chips.take(3).toList();
+}
+
+String _videoSizeSummary(Size size) {
+  if (size.width <= 0 || size.height <= 0) {
+    return '-';
+  }
+  return '${size.width.round()}x${size.height.round()}';
 }
 
 String _qualityLabelFromUrl(String url) {

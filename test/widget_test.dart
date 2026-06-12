@@ -299,6 +299,20 @@ void main() {
     expect(chips, isNot(contains('4K HDR')));
   });
 
+  test('media chips show Bilibili qn separately from decoded resolution', () {
+    final chips = coolCastMediaChipsForTest(
+      currentUrl: 'https://upos-sz-mirror.bilivideo.com/video.m4s',
+      mimeType: 'video/mp4',
+      state: PlaybackState.playing,
+      videoSize: const Size(3840, 2160),
+      biliQuality: 32,
+    );
+
+    expect(chips.first, 'B站 480P 清晰');
+    expect(chips, contains('4K'));
+    expect(chips, contains('MP4'));
+  });
+
   test('ConnectionManager announces common DLNA video sinks', () {
     final response = coolCastProtocolInfoResponseForTest();
 
@@ -643,6 +657,13 @@ void main() {
       coolCastNirvanaControlSummaryForTest(ping),
       contains('native heartbeat seq=7 op=0xe401 len=0'),
     );
+    final shortControl =
+        Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x03, 0xec]);
+    expect(coolCastNirvanaFrameLengthForTest(shortControl), 6);
+    expect(
+      coolCastNirvanaControlSummaryForTest(shortControl),
+      'native control seq=1004 op=0xc000',
+    );
     final heartbeatRequest = Uint8List(11);
     ByteData.view(heartbeatRequest.buffer).setUint16(0, 0xe400);
     ByteData.view(heartbeatRequest.buffer).setUint32(2, 8);
@@ -664,6 +685,37 @@ void main() {
       ),
       isFalse,
     );
+  });
+
+  test('Nirvana parser consumes short control frames before SwitchQn', () {
+    final control = Uint8List.fromList([0xc0, 0x00, 0x00, 0x00, 0x03, 0xec]);
+    final switchQn = coolCastNvaRequestFrameForTest(
+      4,
+      {'Command': 'SwitchQn'},
+      '{"qn":80}',
+    );
+    final combined = Uint8List.fromList([...control, ...switchQn]);
+
+    final firstLength = coolCastNirvanaFrameLengthForTest(combined);
+    expect(firstLength, 6);
+    final secondLength = coolCastNirvanaFrameLengthForTest(
+      Uint8List.sublistView(combined, firstLength!),
+    );
+    expect(secondLength, switchQn.length);
+
+    final parsed = coolCastNvaFrameForTest(
+      Uint8List.sublistView(combined, firstLength),
+    );
+    expect(parsed, isNotNull);
+    expect(parsed!['attributes'], {'Command': 'SwitchQn'});
+    expect(parsed['body'], '{"qn":80}');
+
+    final response = coolCastNirvanaFrameResponseForTest(
+      Uint8List.sublistView(combined, firstLength),
+    );
+    final responseParsed = coolCastNvaFrameForTest(response!);
+    expect(responseParsed!['op'], 0xe004);
+    expect(responseParsed['seq'], 4);
   });
 
   test('Nirvana native frame parser reads command attributes and replies', () {
@@ -938,6 +990,45 @@ void main() {
     );
   });
 
+  test('Bilibili SwitchQn reuses latest Play request with requested qn', () {
+    final body = jsonEncode({
+      'seekTs': 126,
+      'aid': 116621666555985,
+      'cid': 26016292374,
+      'qn': 80,
+      'userDesireQn': -1,
+      'contentType': 4,
+      'accessKey': 'mobile-token-1',
+      'mobileVersion': 8450300,
+      'projection_buried_extra': jsonEncode({
+        'content_id': jsonEncode({
+          'bvid': 'BV1R4Gv6REBG',
+          'avid': '116621666555985',
+          'cid': '26016292374',
+        }),
+      }),
+    });
+
+    final switchQn = coolCastBiliNvaSwitchQnForTest(body, '{"qn":80}');
+    final tvUri = coolCastBiliSwitchedTvPlayUrlUriForTest(body, 80);
+    final fallbackUri = coolCastBiliSwitchedPublicPlayerPlayUrlUriForTest(
+      body,
+      80,
+    );
+
+    expect(switchQn, {
+      'qn': 80,
+      'userDesireQn': 80,
+      'preferredQn': 80,
+      'preferredPublicQn': 80,
+      'seekTs': 42,
+    });
+    expect(tvUri, isNotNull);
+    expect(tvUri!.queryParameters['qn'], '80');
+    expect(fallbackUri, isNotNull);
+    expect(fallbackUri!.queryParameters['qn'], '80');
+  });
+
   test('Bilibili playurl response extracts durl URL', () {
     final response = jsonEncode({
       'code': 0,
@@ -977,6 +1068,24 @@ void main() {
     expect(
       coolCastBiliPlayUrlFromJsonForTest(resultResponse),
       'https://upos.example.com/result.mp4',
+    );
+    final mixedResponse = jsonEncode({
+      'code': 0,
+      'data': {
+        'quality': 32,
+        'dash': {
+          'video': [
+            {'id': 120, 'baseUrl': 'https://upos.example.com/4k.m4s'},
+          ],
+        },
+        'durl': [
+          {'url': 'https://upos.example.com/480p.flv'},
+        ],
+      },
+    });
+    expect(
+      coolCastBiliPlayUrlFromJsonForTest(mixedResponse),
+      'https://upos.example.com/480p.flv',
     );
     expect(
       coolCastBiliPlayUrlFromJsonForTest('{"code":0,"data":{"durl":[]}}'),
