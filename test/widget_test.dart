@@ -354,6 +354,7 @@ void main() {
     );
     expect(searchResponse, endsWith('\r\n\r\n'));
     expect(notify, endsWith('\r\n\r\n'));
+    expect(coolCastSsdpStartupNotifyBurstSecondsForTest(), [1, 2, 4, 8, 12]);
   });
 
   test('SSDP advertises Bilibili NirvanaControl target', () {
@@ -806,6 +807,7 @@ void main() {
     final parsedTvInfoResponse = coolCastNvaFrameForTest(tvInfoResponse!);
     expect(parsedTvInfoResponse!['op'], 0xc003);
     expect(parsedTvInfoResponse['seq'], 2);
+    expect(parsedTvInfoResponse['attributes'], {'Command': 'GetTvInfo'});
     expect(parsedTvInfoResponse['body'], contains('"tvVipInfo":-1'));
     expect(coolCastNirvanaFrameResponsesForTest(getTvInfo), tvInfoResponse);
 
@@ -813,6 +815,7 @@ void main() {
     final parsedVolumeResponse = coolCastNvaFrameForTest(volumeResponse!);
     expect(parsedVolumeResponse!['op'], 0xc003);
     expect(parsedVolumeResponse['seq'], 3);
+    expect(parsedVolumeResponse['attributes'], {'Command': 'GetVolume'});
     expect(parsedVolumeResponse['body'], contains('"volume":50'));
     expect(coolCastNirvanaFrameResponsesForTest(getVolume), volumeResponse);
 
@@ -824,7 +827,7 @@ void main() {
     final parsedPlayInfoResponse = coolCastNvaFrameForTest(playInfoResponse!);
     expect(parsedPlayInfoResponse!['op'], 0xc003);
     expect(parsedPlayInfoResponse['seq'], 4);
-    expect(parsedPlayInfoResponse['attributes'], isEmpty);
+    expect(parsedPlayInfoResponse['attributes'], {'Command': 'GetPlayInfo'});
     expect(parsedPlayInfoResponse['body'], contains('"playState":'));
     expect(parsedPlayInfoResponse['body'], contains('"duration":'));
     expect(parsedPlayInfoResponse['body'], contains('"volume":50'));
@@ -843,6 +846,9 @@ void main() {
     expect(body['playState'], 4);
     expect(body['position'], 0);
     expect(body['duration'], 2666);
+    expect(body, isNot(contains('positionMs')));
+    expect(body, isNot(contains('durationMs')));
+    expect(body, isNot(contains('timelength')));
     expect(body['danmakuState'], isTrue);
     expect(body['volume'], 50);
     expect(body['title'], '');
@@ -894,6 +900,7 @@ void main() {
     expect(parsed['isRequest'], isTrue);
     expect(parsed['attributes'], {'Command': 'OnProgress'});
     expect(parsed['body'], contains('"duration":2666'));
+    expect(parsed['body'], isNot(contains('durationMs')));
 
     final pausedEvent = coolCastNvaServerEventFrameForTest(
       command: 'OnPlayState',
