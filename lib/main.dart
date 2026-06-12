@@ -11,11 +11,11 @@ import 'package:pointycastle/export.dart' as pc;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
-const String _defaultReceiverName = 'CoolCast MiPad4 114';
+const String _defaultReceiverName = 'CoolCast';
 const String _receiverNameKey = 'coolcast.receiverName';
 const String _biliProjectionManufacturer = 'bilibili';
 const String _biliProjectionBrandName = 'bilibili';
-const String _biliProjectionFriendlyName = 'CoolCast MiPad4 114';
+const String _biliProjectionFriendlyName = 'CoolCast';
 const String _biliProjectionModelName = '云视听小电视';
 const String _biliProjectionModelDescription =
     'bilibili official projection receiver';
@@ -34,7 +34,9 @@ const bool _biliProjectionSupport4k = true;
 const bool _biliProjectionNeedNvaExtra = true;
 const bool _biliProjectionIgnoreDirect = true;
 const String _biliProjectionChannelName = 'bilibili';
-const String _biliProjectionAutoPullId = 'coolcast-mipad4-114';
+// Stable protocol identity: Bilibili mobile caches and binds this ID to the
+// Nirvana session. Keep it stable even if the visible receiver name changes.
+const String _biliProjectionAutoPullId = 'coolcast-tv-main';
 const String _biliMobileAppKey = '1d8b6e7d45233436';
 const String _biliMobileAppSecret = '560c52ccd288fed045859ed18bffd973';
 const String _biliMobileMobiApp = 'android';
@@ -49,6 +51,8 @@ const int _biliNirvanaHeartbeatResponseOp = 0xe401;
 const int _ottBlinkPort = 8100;
 const int _nirvanaControlPort = 9958;
 const String _biliDescriptionPath = '/bilibili/description.xml';
+const MethodChannel _deviceInfoChannel =
+    MethodChannel('com.dengpeng.coolcast/device_info');
 const String _upnpServerHeader =
     'Android/14 UPnP/1.0 BiliTV/$_biliProjectionBuild';
 
@@ -152,6 +156,34 @@ class _BiliNvaExt {
         'nl': link?.toJson(),
       };
 }
+
+class _BiliCastStatus {
+  const _BiliCastStatus({
+    required this.aid,
+    required this.cid,
+    required this.quality,
+    required this.timelength,
+    required this.acceptQuality,
+  });
+
+  final int? aid;
+  final int? cid;
+  final int? quality;
+  final int? timelength;
+  final List<int> acceptQuality;
+
+  Map<String, Object?> toJson() => {
+        'aid': aid,
+        'cid': cid,
+        'quality': quality,
+        'timelength': timelength,
+        'acceptQuality': acceptQuality,
+      };
+}
+
+_BiliCastStatus? _latestBiliCastStatus;
+final Set<Socket> _biliNvaSessions = <Socket>{};
+int _biliNvaServerSequence = 1000;
 
 @visibleForTesting
 class DebugAlertOverlayForTest extends StatelessWidget {
@@ -271,15 +303,29 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   Future<void> _loadReceiverName() async {
     final preferences = await SharedPreferences.getInstance();
     final savedName = preferences.getString(_receiverNameKey)?.trim();
+    final nextName = savedName == null || savedName.isEmpty
+        ? await _defaultReceiverNameForDevice()
+        : savedName;
     if (!mounted) {
       return;
     }
     setState(() {
-      _receiverName = savedName == null || savedName.isEmpty
-          ? _defaultReceiverName
-          : savedName;
+      _receiverName = nextName;
       _renameController.text = _receiverName;
     });
+  }
+
+  Future<String> _defaultReceiverNameForDevice() async {
+    if (kIsWeb) {
+      return _defaultReceiverName;
+    }
+    try {
+      final deviceName =
+          await _deviceInfoChannel.invokeMethod<String>('deviceName');
+      return _receiverNameForDevice(deviceName);
+    } on Object {
+      return _defaultReceiverName;
+    }
   }
 
   void _startWebDebugMode() {
@@ -407,6 +453,15 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
+      if (_isUpnpEventSubscription(request)) {
+        await _handleUpnpEventSubscription(
+          request,
+          debugLabel: requestLabel,
+          stopwatch: stopwatch,
+        );
+        return;
+      }
+
       if (request.uri.path == '/AVTransport/control') {
         await _handleAvTransport(request);
         return;
@@ -481,6 +536,31 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         // Best-effort cleanup after a client-side disconnect.
       }
     }
+  }
+
+  Future<void> _handleUpnpEventSubscription(
+    HttpRequest request, {
+    required String debugLabel,
+    required Stopwatch stopwatch,
+  }) async {
+    final method = request.method.toUpperCase();
+    final sid = request.headers.value('sid') ??
+        'uuid:$_biliProjectionAutoPullId-${request.uri.path.hashCode.abs()}';
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.set(HttpHeaders.connectionHeader, 'close')
+      ..persistentConnection = false
+      ..contentLength = 0;
+    if (method == 'SUBSCRIBE') {
+      request.response.headers
+        ..set('SID', sid)
+        ..set('TIMEOUT', 'Second-1800');
+    }
+    await request.response.close();
+    _debugLog(
+      '$debugLabel done status=${HttpStatus.ok} bytes=0 '
+      '${stopwatch.elapsedMilliseconds}ms',
+    );
   }
 
   Future<void> _sendTextResponse(
@@ -588,10 +668,12 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     final localAddress = _nvaReplyAddress(socket.address.address);
     final label = 'Nirvana#$socketId';
     final buffer = <int>[];
-    var keepAliveAfterAck = false;
+    var lastCommand = '<none>';
+    var nativeResponses = 0;
 
     try {
       _debugLog('$label connected from $requester local=$localAddress');
+      _biliNvaSessions.add(socket);
       _recordNirvanaControl(requester, '9958 长链已连接');
 
       await for (final chunk in socket.timeout(const Duration(minutes: 2))) {
@@ -624,6 +706,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
             requester: requester,
             localAddress: localAddress,
           );
+          lastCommand = _nvaCommandForLog(frame) ?? lastCommand;
           if (_shouldSendNirvanaTextAck(frame)) {
             final ack = _nirvanaTextAck(
               frame,
@@ -635,14 +718,16 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
             socket.add(utf8.encode(ack));
             await socket.flush();
             _debugLog('$label ACK flushed to $requester');
-            keepAliveAfterAck = true;
           } else {
-            await _sendNirvanaFrameResponseIfNeeded(
+            final didRespond = await _handleNirvanaFrameRequestIfNeeded(
               socket,
               frame,
               label,
               requester,
             );
+            if (didRespond) {
+              nativeResponses += 1;
+            }
           }
         }
       }
@@ -653,6 +738,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
           requester: requester,
           localAddress: localAddress,
         );
+        lastCommand = _nvaCommandForLog(frame) ?? lastCommand;
         if (_shouldSendNirvanaTextAck(frame)) {
           final ack = _nirvanaTextAck(
             frame,
@@ -663,27 +749,35 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
           socket.add(utf8.encode(ack));
           await socket.flush();
           _debugLog('$label ACK flushed to $requester');
-          keepAliveAfterAck = true;
         } else {
-          await _sendNirvanaFrameResponseIfNeeded(
+          final didRespond = await _handleNirvanaFrameRequestIfNeeded(
             socket,
             frame,
             label,
             requester,
           );
+          if (didRespond) {
+            nativeResponses += 1;
+          }
         }
       }
-      _debugLog('$label read side reached EOF from $requester');
+      _debugLog(
+        '$label read side reached EOF from $requester '
+        'lastCommand=$lastCommand nativeResponses=$nativeResponses',
+      );
       _recordNirvanaControl(requester, '9958 对端已关闭');
-      if (keepAliveAfterAck) {
-        _debugLog('$label keeping write side open after ACK for $requester');
-        await Future<void>.delayed(const Duration(seconds: 60));
-      }
     } on Object catch (error) {
-      _debugLog('$label socket error from $requester: ${_shortError(error)}');
+      _debugLog(
+        '$label socket error from $requester: ${_shortError(error)} '
+        'lastCommand=$lastCommand nativeResponses=$nativeResponses',
+      );
       _recordNirvanaControl(requester, '9958 错误：${_shortError(error)}');
     } finally {
-      _debugLog('$label socket destroyed for $requester');
+      _biliNvaSessions.remove(socket);
+      _debugLog(
+        '$label socket destroyed for $requester '
+        'lastCommand=$lastCommand nativeResponses=$nativeResponses',
+      );
       socket.destroy();
     }
   }
@@ -695,7 +789,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     return socketAddress;
   }
 
-  Future<void> _sendNirvanaFrameResponseIfNeeded(
+  Future<bool> _handleNirvanaFrameRequestIfNeeded(
     Socket socket,
     Uint8List frame,
     String label,
@@ -703,7 +797,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   ) async {
     final response = _nirvanaFrameResponse(frame);
     if (response == null) {
-      return;
+      return false;
     }
     socket.add(response);
     await socket.flush();
@@ -711,6 +805,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       '$label frame response to $requester '
       'summary=${_nirvanaControlSummary(response)}',
     );
+    return true;
   }
 
   Future<void> _processNirvanaControlData(
@@ -734,6 +829,8 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       _recordNirvanaControl(requester, nvaFrame.summary);
       if (nvaFrame.isRequest) {
         if (nvaFrame.attributes['Command'] == 'Play') {
+          _latestBiliCastStatus = null;
+          _debugLog('B站状态缓存已清空：收到新的 Play');
           unawaited(_acceptBiliNvaPlay(
             nvaFrame.bodyText,
             requester: requester,
@@ -805,6 +902,11 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
 
     _debugLog('B站 playurl OK for $requester: ${_shortUrl(result.url!)}');
+    _latestBiliCastStatus = result.status;
+    if (result.status != null) {
+      _debugLog('B站状态已缓存: ${result.status!.toJson()}');
+      unawaited(_sendBiliPlaybackStatusEvents(result.status!));
+    }
     _recordNirvanaControl(requester, 'PlayUrl ${_shortUrl(result.url!)}');
     unawaited(
       _acceptUrl(
@@ -813,6 +915,45 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         httpHeaders: _biliPlaybackHeaders(bvid: play.bvid, aid: play.aid),
       ),
     );
+  }
+
+  Future<void> _sendBiliPlaybackStatusEvents(_BiliCastStatus status) async {
+    final durationSeconds = ((status.timelength ?? 0) / 1000).round();
+    final events = <Uint8List>[
+      _nvaServerEventFrame(
+        command: 'OnPlayState',
+        body: jsonEncode({'playState': 2}),
+      ),
+      _nvaServerEventFrame(
+        command: 'OnProgress',
+        body: jsonEncode({
+          'position': 0,
+          'duration': durationSeconds,
+        }),
+      ),
+    ];
+    if (status.quality != null) {
+      events.add(_nvaServerEventFrame(
+        command: 'OnQnSwitch',
+        body: jsonEncode(_biliQnDescriptionBody(status)),
+      ));
+    }
+
+    final sessions = _biliNvaSessions.toList(growable: false);
+    _debugLog(
+      'B站主动状态事件: sessions=${sessions.length} '
+      'duration=$durationSeconds quality=${status.quality ?? '-'}',
+    );
+    for (final session in sessions) {
+      try {
+        for (final event in events) {
+          session.add(event);
+          await session.flush();
+        }
+      } on Object catch (error) {
+        _debugLog('B站主动状态事件发送失败: ${_shortError(error)}');
+      }
+    }
   }
 
   bool _matchesSearchTarget(String message) {
@@ -3535,6 +3676,10 @@ Uint8List coolCastOttBlinkResponseForTest(String receiverName) =>
     _ottBlinkResponse(receiverName);
 
 @visibleForTesting
+String coolCastReceiverNameForDeviceForTest(String? deviceName) =>
+    _receiverNameForDevice(deviceName);
+
+@visibleForTesting
 String? coolCastNirvanaControlUrlForTest(String payload) =>
     _extractNirvanaControlUrl(payload);
 
@@ -3585,6 +3730,14 @@ String? coolCastBiliPlayUrlFromJsonForTest(String body) =>
     _extractBiliPlayUrl(_tryJsonDecode(body));
 
 @visibleForTesting
+Map<String, Object?>? coolCastBiliCastStatusFromJsonForTest(
+  String body, {
+  int? aid,
+  int? cid,
+}) =>
+    _extractBiliCastStatus(_tryJsonDecode(body), aid: aid, cid: cid)?.toJson();
+
+@visibleForTesting
 String coolCastNirvanaControlSummaryForTest(Uint8List data) =>
     _nirvanaControlSummary(data);
 
@@ -3619,6 +3772,29 @@ Uint8List coolCastNirvanaPingFrameForTest(int sequence) =>
 
 Uint8List? coolCastNirvanaFrameResponseForTest(Uint8List data) =>
     _nirvanaFrameResponse(data);
+
+@visibleForTesting
+String coolCastBiliPlayInfoResponseForTest({
+  int? aid,
+  int? cid,
+  int? quality,
+  int? timelength,
+  List<int> acceptQuality = const [],
+}) =>
+    _biliPlayInfoResponseBody(_BiliCastStatus(
+      aid: aid,
+      cid: cid,
+      quality: quality,
+      timelength: timelength,
+      acceptQuality: acceptQuality,
+    ));
+
+@visibleForTesting
+Uint8List coolCastNvaServerEventFrameForTest({
+  required String command,
+  required String body,
+}) =>
+    _nvaServerEventFrame(command: command, body: body);
 
 @visibleForTesting
 Map<String, Object?>? coolCastNvaFrameForTest(Uint8List data) {
@@ -4357,11 +4533,14 @@ class _BiliNvaPlayRequest {
 }
 
 class _BiliPlayUrlResult {
-  const _BiliPlayUrlResult.url(this.url) : error = null;
-  const _BiliPlayUrlResult.error(this.error) : url = null;
+  const _BiliPlayUrlResult.url(this.url, {this.status}) : error = null;
+  const _BiliPlayUrlResult.error(this.error)
+      : url = null,
+        status = null;
 
   final String? url;
   final String? error;
+  final _BiliCastStatus? status;
 }
 
 Future<_BiliPlayUrlResult> _fetchBiliPlayUrl(_BiliNvaPlayRequest play) async {
@@ -4369,6 +4548,8 @@ Future<_BiliPlayUrlResult> _fetchBiliPlayUrl(_BiliNvaPlayRequest play) async {
     _biliTvPlayUrlUri(play),
     label: 'B站 tv playurl',
     refererBvid: play.bvid,
+    aid: play.aid,
+    cid: play.cid,
   );
   if (tvResult.url != null) {
     return tvResult;
@@ -4382,6 +4563,8 @@ Future<_BiliPlayUrlResult> _fetchBiliPlayUrl(_BiliNvaPlayRequest play) async {
     publicUri,
     label: 'B站 player playurl',
     refererBvid: play.bvid,
+    aid: play.aid,
+    cid: play.cid,
   );
   if (publicResult.url != null) {
     return publicResult;
@@ -4396,6 +4579,8 @@ Future<_BiliPlayUrlResult> _fetchBiliPlayUrlFromUri(
   Uri uri, {
   required String label,
   required String? refererBvid,
+  required int? aid,
+  required int? cid,
 }) async {
   _debugLog('$label request: ${_shortUrl(uri.toString())}');
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
@@ -4430,7 +4615,14 @@ Future<_BiliPlayUrlResult> _fetchBiliPlayUrlFromUri(
     if (url == null) {
       return _BiliPlayUrlResult.error('$label 无 durl/url');
     }
-    return _BiliPlayUrlResult.url(url);
+    return _BiliPlayUrlResult.url(
+      url,
+      status: _extractBiliCastStatus(
+        decoded,
+        aid: aid,
+        cid: cid,
+      ),
+    );
   } on Object catch (error) {
     return _BiliPlayUrlResult.error('$label 异常：${_shortError(error)}');
   } finally {
@@ -4512,6 +4704,31 @@ String? _extractBiliPlayUrl(Object? decoded) {
   return _findUrlInBiliPlayUrl(data) ?? _findUrlInBiliPlayUrl(decoded);
 }
 
+_BiliCastStatus? _extractBiliCastStatus(
+  Object? decoded, {
+  required int? aid,
+  required int? cid,
+}) {
+  final data = _jsonMap(decoded)?['data'] ?? _jsonMap(decoded)?['result'];
+  final map = _jsonMap(data);
+  if (map == null) {
+    return null;
+  }
+  final quality = _jsonInt(map['quality']);
+  final timelength = _jsonInt(map['timelength']);
+  final acceptQuality = _jsonIntList(map['accept_quality']);
+  if (quality == null && timelength == null && acceptQuality.isEmpty) {
+    return null;
+  }
+  return _BiliCastStatus(
+    aid: aid,
+    cid: cid,
+    quality: quality,
+    timelength: timelength,
+    acceptQuality: acceptQuality,
+  );
+}
+
 String? _findUrlInBiliPlayUrl(Object? value) {
   if (value is String) {
     return _isValidCastUrl(value) ? value : null;
@@ -4545,6 +4762,13 @@ String? _findUrlInBiliPlayUrl(Object? value) {
 }
 
 int? _biliApiCode(Object? decoded) => _jsonInt(_jsonMap(decoded)?['code']);
+
+List<int> _jsonIntList(Object? value) {
+  if (value is! List) {
+    return const [];
+  }
+  return value.map(_jsonInt).whereType<int>().toList(growable: false);
+}
 
 String _biliApiMessage(Object? decoded) {
   final map = _jsonMap(decoded);
@@ -4658,6 +4882,11 @@ String _nirvanaControlSummary(Uint8List data) {
     return heartbeatSummary;
   }
   return 'hex ${data.take(32).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(' ')}';
+}
+
+String? _nvaCommandForLog(Uint8List data) {
+  final frame = _parseNvaFrame(data);
+  return frame?.attributes['Command'];
 }
 
 class _NvaFrame {
@@ -5042,7 +5271,7 @@ Uint8List _nirvanaPingFrame(int sequence) {
 Uint8List? _nirvanaFrameResponse(Uint8List data) {
   final nvaFrame = _parseNvaFrame(data);
   if (nvaFrame != null && nvaFrame.isRequest) {
-    final responseBody = _nirvanaResponseBodyForCommand(
+    final responseBody = _defaultNirvanaResponseBodyForCommand(
       nvaFrame.attributes['Command'],
     );
     return _nvaFrame(
@@ -5064,20 +5293,160 @@ Uint8List? _nirvanaFrameResponse(Uint8List data) {
   return _nirvanaPingFrame(sequence);
 }
 
-String _nirvanaResponseBodyForCommand(String? command) {
+String _defaultNirvanaResponseBodyForCommand(String? command) {
   switch (command) {
     case 'GetVolume':
       return jsonEncode({'volume': 50});
     case 'GetTvInfo':
-      return jsonEncode({'tvVipInfo': -1, 'tvMid': null});
+      return _biliTvInfoResponseBody(_latestBiliCastStatus);
+    case 'GetPlayInfo':
+      return _biliPlayInfoResponseBody(_latestBiliCastStatus);
     default:
       return '';
   }
 }
 
+String _biliTvInfoResponseBody(_BiliCastStatus? status) {
+  final body = <String, Object?>{
+    'tvVipInfo': -1,
+    'tvMid': null,
+  };
+  if (status != null) {
+    if (status.aid != null) {
+      body['aid'] = status.aid;
+    }
+    if (status.cid != null) {
+      body['cid'] = status.cid;
+    }
+    if (status.quality != null) {
+      body['quality'] = status.quality;
+    }
+    if (status.timelength != null) {
+      body['duration'] = status.timelength;
+      body['durationMs'] = status.timelength;
+      body['timelength'] = status.timelength;
+    }
+    if (status.acceptQuality.isNotEmpty) {
+      body['acceptQuality'] = status.acceptQuality;
+      body['accept_quality'] = status.acceptQuality;
+    }
+  }
+  return jsonEncode(body);
+}
+
+String _biliPlayInfoResponseBody(_BiliCastStatus? status) {
+  final durationSeconds = ((status?.timelength ?? 0) / 1000).round();
+  return jsonEncode({
+    'playState': status == null ? 0 : 2,
+    'position': 0,
+    'duration': durationSeconds,
+    'danmakuState': true,
+    'playItem': {
+      'aid': status?.aid ?? 0,
+      'cid': status?.cid ?? 0,
+      'epId': 0,
+      'seasonId': 0,
+      'roomId': 0,
+      'biz': 0,
+    },
+    'listInfo': null,
+    'qn': _biliQnDescriptionBody(status),
+    'title': '',
+    'volume': 50,
+    'speedInfo': {
+      'supportSpeedList': [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+      'currSpeed': 1.0,
+    },
+  });
+}
+
+Map<String, Object?>? _biliQnDescriptionBody(_BiliCastStatus? status) {
+  if (status?.quality == null && (status?.acceptQuality.isEmpty ?? true)) {
+    return null;
+  }
+  final qualities = status!.acceptQuality.isEmpty
+      ? <int>[status.quality!]
+      : status.acceptQuality;
+  return {
+    'supportQnList': [
+      for (final quality in qualities)
+        {
+          'quality': quality,
+          'description': _biliQualityDescription(quality),
+          'displayDesc': _biliQualityDescription(quality),
+          'superscript': '',
+          'needLogin': false,
+          'needVip': false,
+        },
+    ],
+    'curQn': status.quality ?? qualities.first,
+    'userDesireQn': status.quality ?? qualities.first,
+  };
+}
+
+String _biliQualityDescription(int quality) {
+  switch (quality) {
+    case 126:
+      return '杜比视界';
+    case 120:
+      return '4K 超清';
+    case 112:
+      return '1080P 高码率';
+    case 80:
+      return '1080P 高清';
+    case 64:
+      return '720P 高清';
+    case 32:
+      return '480P 清晰';
+    case 16:
+      return '360P 流畅';
+    default:
+      return 'QN $quality';
+  }
+}
+
+Uint8List _nvaServerEventFrame({
+  required String command,
+  required String body,
+}) =>
+    _nvaFrame(
+      op: _biliNirvanaRequestOp,
+      sequence: ++_biliNvaServerSequence,
+      attributes: {'Command': command},
+      body: Uint8List.fromList(utf8.encode(body)),
+    );
+
+bool _isUpnpEventSubscription(HttpRequest request) {
+  final method = request.method.toUpperCase();
+  if (method != 'SUBSCRIBE' && method != 'UNSUBSCRIBE') {
+    return false;
+  }
+  return _upnpEventPaths.contains(request.uri.path);
+}
+
+const Set<String> _upnpEventPaths = {
+  '/AVTransport/event',
+  '/RenderingControl/event',
+  '/ConnectionManager/event',
+  '/NirvanaControl/event',
+};
+
 String _biliFriendlyName(String receiverName) {
   final name = receiverName.trim();
   return name.isEmpty ? _biliProjectionFriendlyName : name;
+}
+
+String _receiverNameForDevice(String? deviceName) {
+  final normalized = deviceName?.trim().replaceAll(RegExp(r'\s+'), ' ');
+  if (normalized == null ||
+      normalized.isEmpty ||
+      normalized.toLowerCase() == 'unknown') {
+    return _defaultReceiverName;
+  }
+  if (normalized.toLowerCase().startsWith('coolcast')) {
+    return normalized;
+  }
+  return '$_defaultReceiverName - $normalized';
 }
 
 String _soapResponse(

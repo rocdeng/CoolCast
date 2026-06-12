@@ -19,7 +19,7 @@ Make CoolCast receive Bilibili mobile projection like the official Bilibili TV r
 
 | Step | Result |
 | --- | --- |
-| Discovery | Phone discovers `CoolCast MiPad4 114`. |
+| Discovery | Phone discovers `CoolCast`. |
 | UPnP metadata | Phone fetches `/bilibili/description.xml`, `/AVTransport/scpd.xml`, `/RenderingControl/scpd.xml`, and `/NirvanaControl/scpd.xml`. |
 | Nirvana long link | Phone connects to receiver port `9958`; `SETUP` and `RESTORE` receive `200 OK`. |
 | Play command | Receiver parses native NVA `Command=Play` frames with `aid`, `cid`, `accessKey`, `qn`, and projection metadata. |
@@ -27,6 +27,7 @@ Make CoolCast receive Bilibili mobile projection like the official Bilibili TV r
 | Public fallback | `/x/player/playurl` works with `bvid+cid` or `avid+cid`. |
 | Anti-leech playback | UPOS playback needs Bilibili-style `User-Agent` and `Referer`; otherwise ExoPlayer gets HTTP `403`. |
 | 4K | With `access_key`, `fnval=4048`, `fourk=1`, and `qn=120`, `/x/player/playurl` returned `quality=120`, `format=hdflv2`. The Pad player showed 4K. |
+| Receiver identity | The visible name is device-specific (`CoolCast - <device>`), while the protocol `autoPullId`/`uuid` is a stable logical receiver ID. Current experiment value: `coolcast-tv-main`; changing receiver IDs requires killing/restarting the Bilibili app before judging whether `Command=Play` is sent. |
 
 ## Important Findings
 
@@ -86,4 +87,3 @@ ExoPlayer Init ...
 | In-app quality switching may still differ from official TV receiver. | Capture phone logs while changing projection quality; look for new NVA `Command`, `SetQuality`, or status query frames. |
 | Receiver status reporting is minimal. | Compare official TV receiver responses for `GetTvInfo`, progress, quality, and device capability fields. |
 | `/x/tv/playurl` still returns `-400`. | Only revisit with stronger evidence from official receiver request parameters or decrypted app path. |
-

@@ -91,6 +91,18 @@ void main() {
     expect(find.text('再次按返回退出 CoolCast'), findsOneWidget);
   });
 
+  test('default receiver name includes Android device name', () {
+    expect(coolCastReceiverNameForDeviceForTest('Mi 10'), 'CoolCast - Mi 10');
+    expect(
+      coolCastReceiverNameForDeviceForTest('  Mi   Pad 4  '),
+      'CoolCast - Mi Pad 4',
+    );
+    expect(
+        coolCastReceiverNameForDeviceForTest('CoolCast - 客厅'), 'CoolCast - 客厅');
+    expect(coolCastReceiverNameForDeviceForTest('unknown'), 'CoolCast');
+    expect(coolCastReceiverNameForDeviceForTest(null), 'CoolCast');
+  });
+
   test('DLNA description exposes required renderer services', () {
     final description = coolCastDeviceDescriptionForTest(
       '192.168.1.18',
@@ -148,7 +160,9 @@ void main() {
     expect(description, contains('<ottVersion>104800</ottVersion>'));
     expect(description, contains('<channelName>bilibili</channelName>'));
     expect(
-        description, contains('<autoPullId>coolcast-mipad4-114</autoPullId>'));
+      description,
+      contains('<autoPullId>coolcast-tv-main</autoPullId>'),
+    );
     expect(description, contains('<capability>1</capability>'));
     expect(description, isNot(contains('<brandName>')));
     expect(description, isNot(contains('<hostVersion>')));
@@ -339,7 +353,7 @@ void main() {
       );
 
       expect(response, contains('ST: $target'));
-      expect(response, contains('USN: uuid:coolcast-mipad4-114::$target'));
+      expect(response, contains('USN: uuid:coolcast-tv-main::$target'));
     }
   });
 
@@ -375,7 +389,7 @@ void main() {
 
     expect(jsonLength, payload.length);
     expect(json['address'], 'android_bilithings');
-    expect(json['uuid'], 'coolcast-mipad4-114');
+    expect(json['uuid'], 'coolcast-tv-main');
     expect(json['friendlyName'], '客厅电视 & CoolCast');
     expect(json['model_name'], '云视听小电视');
     expect(json['brand_name'], 'bilibili');
@@ -393,7 +407,7 @@ void main() {
     expect(json['castService'], 'urn:schemas-upnp-org:service:AVTransport:1');
     expect(json['needNvaExtra'], isTrue);
     expect(json['ignoreDirect'], isTrue);
-    expect(json['autoPullId'], 'coolcast-mipad4-114');
+    expect(json['autoPullId'], 'coolcast-tv-main');
   });
 
   test('Nirvana control payload extracts playable URL from JSON', () {
@@ -463,15 +477,15 @@ void main() {
 
     expect(reply['code'], 'link-code-1');
     expect(reply['from'], 'coolcast');
-    expect(reply['buvid'], 'coolcast-mipad4-114');
+    expect(reply['buvid'], 'coolcast-tv-main');
     expect(reply['nvaLinkAddress'], '192.168.50.8:9958');
-    expect(reply['friendlyName'], 'CoolCast MiPad4 114');
+    expect(reply['friendlyName'], 'CoolCast');
     expect(reply['modelName'], '云视听小电视');
     expect(reply['brandName'], 'bilibili');
     expect(reply['manufacturer'], 'bilibili');
     expect(reply['ottVersion'], 104800);
     expect(reply['ignoreDirect'], isTrue);
-    expect(reply['autoPullId'], 'coolcast-mipad4-114');
+    expect(reply['autoPullId'], 'coolcast-tv-main');
   });
 
   test('Nirvana probe acknowledgement echoes official projection features', () {
@@ -482,8 +496,8 @@ void main() {
     expect(ack['code'], 0);
     expect(ack['status'], 'ok');
     expect(ack['from'], 'coolcast');
-    expect(ack['buvid'], 'coolcast-mipad4-114');
-    expect(ack['nvaLinkAddress'], 'coolcast-mipad4-114:9958');
+    expect(ack['buvid'], 'coolcast-tv-main');
+    expect(ack['nvaLinkAddress'], 'coolcast-tv-main:9958');
     expect(ack['modelName'], '云视听小电视');
     expect(ack['brandName'], 'bilibili');
     expect(ack['manufacturer'], 'bilibili');
@@ -493,8 +507,8 @@ void main() {
     expect(ack['castService'], 'urn:schemas-upnp-org:service:AVTransport:1');
     expect(ack['needNvaExtra'], isTrue);
     expect(ack['ignoreDirect'], isTrue);
-    expect(ack['autoPullId'], 'coolcast-mipad4-114');
-    expect(device['friendlyName'], 'CoolCast MiPad4 114');
+    expect(ack['autoPullId'], 'coolcast-tv-main');
+    expect(device['friendlyName'], 'CoolCast');
     expect(device['model_name'], '云视听小电视');
     expect(device['brandName'], 'bilibili');
     expect(device['manufacturer'], 'bilibili');
@@ -744,6 +758,74 @@ void main() {
     expect(parsedVolumeResponse!['op'], 0xe004);
     expect(parsedVolumeResponse['seq'], 3);
     expect(parsedVolumeResponse['body'], contains('"volume":50'));
+
+    final getPlayInfo = coolCastNvaEmptyRequestFrameForTest(
+      4,
+      {'Command': 'GetPlayInfo'},
+    );
+    final playInfoResponse = coolCastNirvanaFrameResponseForTest(getPlayInfo);
+    final parsedPlayInfoResponse = coolCastNvaFrameForTest(playInfoResponse!);
+    expect(parsedPlayInfoResponse!['op'], 0xe004);
+    expect(parsedPlayInfoResponse['seq'], 4);
+    expect(parsedPlayInfoResponse['attributes'], isEmpty);
+    expect(parsedPlayInfoResponse['body'], contains('"playState":'));
+    expect(parsedPlayInfoResponse['body'], contains('"duration":'));
+    expect(parsedPlayInfoResponse['body'], contains('"volume":50'));
+  });
+
+  test('Bilibili play info response follows official nvalink status shape', () {
+    final body = jsonDecode(coolCastBiliPlayInfoResponseForTest(
+      aid: 116621666555985,
+      cid: 26016292374,
+      quality: 120,
+      timelength: 2665726,
+      acceptQuality: const [120, 112, 80, 64],
+    )) as Map<String, Object?>;
+
+    expect(body['playState'], 2);
+    expect(body['position'], 0);
+    expect(body['duration'], 2666);
+    expect(body['danmakuState'], isTrue);
+    expect(body['volume'], 50);
+    expect(body['title'], '');
+    expect(body['playItem'], {
+      'aid': 116621666555985,
+      'cid': 26016292374,
+      'epId': 0,
+      'seasonId': 0,
+      'roomId': 0,
+      'biz': 0,
+    });
+    final qn = body['qn'] as Map<String, Object?>;
+    expect(qn['curQn'], 120);
+    expect(qn['userDesireQn'], 120);
+    final supportQnList = qn['supportQnList'] as List<Object?>;
+    expect(supportQnList, hasLength(4));
+    expect(supportQnList.first, {
+      'quality': 120,
+      'description': '4K 超清',
+      'displayDesc': '4K 超清',
+      'superscript': '',
+      'needLogin': false,
+      'needVip': false,
+    });
+    final speedInfo = body['speedInfo'] as Map<String, Object?>;
+    expect(speedInfo['currSpeed'], 1.0);
+    expect(speedInfo['supportSpeedList'], contains(2.0));
+  });
+
+  test('Bilibili active status events use native request command frames', () {
+    final event = coolCastNvaServerEventFrameForTest(
+      command: 'OnProgress',
+      body: '{"position":0,"duration":2666}',
+    );
+    final parsed = coolCastNvaFrameForTest(event);
+
+    expect(parsed, isNotNull);
+    expect(parsed!['op'], 0xe003);
+    expect(parsed['isRequest'], isTrue);
+    expect(parsed['attributes'], {'Command': 'OnProgress'});
+    expect(parsed['body'], contains('"duration":2666'));
   });
 
   test('Bilibili NVA Play body builds tv playurl request', () {
@@ -861,11 +943,13 @@ void main() {
       'code': 0,
       'message': '0',
       'data': {
-        'quality': 80,
+        'quality': 120,
+        'timelength': 2665726,
+        'accept_quality': [120, 112, 80],
         'durl': [
           {
             'order': 1,
-            'url': 'https://upos.example.com/video.m4s?qn=80',
+            'url': 'https://upos.example.com/video.m4s?qn=120',
           },
         ],
       },
@@ -881,8 +965,15 @@ void main() {
 
     expect(
       coolCastBiliPlayUrlFromJsonForTest(response),
-      'https://upos.example.com/video.m4s?qn=80',
+      'https://upos.example.com/video.m4s?qn=120',
     );
+    expect(coolCastBiliCastStatusFromJsonForTest(response, aid: 1, cid: 2), {
+      'aid': 1,
+      'cid': 2,
+      'quality': 120,
+      'timelength': 2665726,
+      'acceptQuality': [120, 112, 80],
+    });
     expect(
       coolCastBiliPlayUrlFromJsonForTest(resultResponse),
       'https://upos.example.com/result.mp4',
