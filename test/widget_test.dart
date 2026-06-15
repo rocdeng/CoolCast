@@ -8,6 +8,75 @@ import 'package:coolcast/main.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final transparentPng = Uint8List.fromList(const [
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    0x00,
+    0x00,
+    0x00,
+    0x0d,
+    0x49,
+    0x48,
+    0x44,
+    0x52,
+    0x00,
+    0x00,
+    0x00,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    0x01,
+    0x08,
+    0x06,
+    0x00,
+    0x00,
+    0x00,
+    0x1f,
+    0x15,
+    0xc4,
+    0x89,
+    0x00,
+    0x00,
+    0x00,
+    0x0a,
+    0x49,
+    0x44,
+    0x41,
+    0x54,
+    0x78,
+    0x9c,
+    0x63,
+    0x00,
+    0x01,
+    0x00,
+    0x00,
+    0x05,
+    0x00,
+    0x01,
+    0x0d,
+    0x0a,
+    0x2d,
+    0xb4,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x49,
+    0x45,
+    0x4e,
+    0x44,
+    0xae,
+    0x42,
+    0x60,
+    0x82,
+  ]);
 
   testWidgets('shows receiver home screen', (WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1920, 1080));
@@ -81,6 +150,85 @@ void main() {
     expect(find.text('返回'), findsNothing);
     expect(find.text('投屏来源'), findsNothing);
     expect(find.byTooltip('暂停'), findsNothing);
+  });
+
+  testWidgets('playing page renders cast images', (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1920, 1080));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PlayingPageForTest(
+            showControls: false,
+            imageUrl: 'http://example.com/photo.jpg',
+            imageBytes: transparentPng,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const ValueKey('cast-image-surface')), findsOneWidget);
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.text('返回'), findsNothing);
+    expect(find.text('投屏来源'), findsNothing);
+    expect(find.byTooltip('暂停'), findsNothing);
+  });
+
+  test('image state opens the playing page', () {
+    expect(
+      coolCastShouldShowPlayingPageForTest(
+        isShowingVideo: false,
+        isPlayingPreviewVisible: false,
+        imageUrl: 'http://example.com/photo.jpg',
+      ),
+      isTrue,
+    );
+    expect(
+      coolCastShouldShowPlayingPageForTest(
+        isShowingVideo: false,
+        isPlayingPreviewVisible: false,
+        imageBytes: transparentPng,
+      ),
+      isTrue,
+    );
+  });
+
+  test('DLNA stop keeps image casts on the playing page', () {
+    expect(
+      coolCastShouldClearPlayingPageOnDlnaStopForTest(
+        imageUrl: 'http://example.com/photo.jpg',
+      ),
+      isFalse,
+    );
+    expect(
+      coolCastShouldClearPlayingPageOnDlnaStopForTest(
+        imageBytes: transparentPng,
+      ),
+      isFalse,
+    );
+    expect(coolCastShouldClearPlayingPageOnDlnaStopForTest(), isTrue);
+  });
+
+  test('stale image load failures do not show debug alerts', () {
+    expect(
+      coolCastShouldReportImageLoadFailureForTest(
+        requestId: 3,
+        activeRequestId: 3,
+        requestUrl: 'http://example.com/latest.jpg',
+        currentImageUrl: 'http://example.com/latest.jpg',
+      ),
+      isTrue,
+    );
+    expect(
+      coolCastShouldReportImageLoadFailureForTest(
+        requestId: 2,
+        activeRequestId: 3,
+        requestUrl: 'http://example.com/old.jpg',
+        currentImageUrl: 'http://example.com/latest.jpg',
+      ),
+      isFalse,
+    );
   });
 
   testWidgets('first back on home asks for a second back',
@@ -335,6 +483,44 @@ void main() {
 
     expect(info.title, '测试视频 & 片段');
     expect(info.mimeType, 'video/mp4');
+    expect(info.isImage, isFalse);
+  });
+
+  test('DLNA metadata parser identifies images', () {
+    final info = coolCastMediaInfoFromMetadataForTest('''
+<DIDL-Lite>
+  <item>
+    <dc:title>测试图片</dc:title>
+    <res protocolInfo="http-get:*:image/jpeg:*">
+      http://example.com/photo.jpg
+    </res>
+  </item>
+</DIDL-Lite>
+''');
+
+    expect(info.title, '测试图片');
+    expect(info.mimeType, 'image/jpeg');
+    expect(info.isImage, isTrue);
+  });
+
+  test('image metadata identifies extensionless push URLs', () {
+    final info = coolCastMediaInfoFromMetadataForTest('''
+<DIDL-Lite>
+  <item>
+    <res protocolInfo="http-get:*:image/jpeg:*">
+      http://192.168.3.172:8197/push-image-item-1000001310
+    </res>
+  </item>
+</DIDL-Lite>
+''');
+    final chips = coolCastMediaChipsForTest(
+      currentUrl: 'http://192.168.3.172:8197/push-image-item-1000001310',
+      mimeType: info.mimeType,
+      state: PlaybackState.playing,
+    );
+
+    expect(info.isImage, isTrue);
+    expect(chips, contains('JPEG'));
   });
 
   test('media chips expose useful cast diagnostics without fake quality', () {

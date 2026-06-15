@@ -423,6 +423,8 @@ class CoolCastMediaInfo {
 
   final String title;
   final String mimeType;
+
+  bool get isImage => _isImageMimeType(mimeType);
 }
 
 @visibleForTesting
@@ -431,14 +433,23 @@ CoolCastMediaInfo coolCastMediaInfoFromMetadataForTest(String metadata) =>
 
 @visibleForTesting
 class PlayingPageForTest extends StatelessWidget {
-  const PlayingPageForTest({super.key, required this.showControls});
+  const PlayingPageForTest({
+    super.key,
+    required this.showControls,
+    this.imageUrl = '',
+    this.imageBytes,
+  });
 
   final bool showControls;
+  final String imageUrl;
+  final Uint8List? imageBytes;
 
   @override
   Widget build(BuildContext context) {
     return _PlayingPage(
       player: null,
+      imageUrl: imageUrl,
+      imageBytes: imageBytes,
       state: PlaybackState.playing,
       source: 'DLNA/UPnP',
       fileName: '测试视频.mp4',
@@ -483,6 +494,12 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   _CoolCastPlayer? _player;
   PlaybackState _state = PlaybackState.idle;
   String _currentUrl = '';
+  String _currentImageUrl = '';
+  Uint8List? _currentImageBytes;
+  int _imageLoadRequestId = 0;
+  String _pendingDlnaUrl = '';
+  String _pendingDlnaSource = '';
+  CoolCastMediaInfo _pendingDlnaMediaInfo = const CoolCastMediaInfo();
   String _castSource = '等待投屏设备';
   String _currentMediaTitle = '';
   String _currentMimeType = '';
@@ -1488,10 +1505,18 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         _extractSoapValue(body, 'CurrentURIMetaData'),
       );
       if (!isNextUri) {
+        final source = _sourceWithRemoteAddress('DLNA/UPnP', request);
+        _pendingDlnaUrl = url;
+        _pendingDlnaSource = source;
+        _pendingDlnaMediaInfo = metadata;
+        _debugLog(
+          'DLNA SetURI url=${_shortUrl(url)} '
+          'mime=${metadata.mimeType.isEmpty ? '-' : metadata.mimeType}',
+        );
         unawaited(
           _acceptUrl(
             url,
-            source: _sourceWithRemoteAddress('DLNA/UPnP', request),
+            source: source,
             mediaInfo: metadata,
           ),
         );
@@ -1507,7 +1532,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
 
     if (body.contains('<u:Play') || body.contains(':Play')) {
-      unawaited(_play());
+      unawaited(_play(source: _sourceWithRemoteAddress('DLNA/UPnP', request)));
       await sendXml(_soapResponse('PlayResponse'));
       return;
     }
@@ -1519,7 +1544,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
 
     if (body.contains('<u:Stop') || body.contains(':Stop')) {
-      unawaited(_returnToHome());
+      _handleDlnaStop();
       await sendXml(_soapResponse('StopResponse'));
       return;
     }
@@ -1726,6 +1751,10 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       );
       return;
     }
+    if (mediaInfo.isImage || _isImageUrl(value)) {
+      await _acceptImageUrl(value, source: source, mediaInfo: mediaInfo);
+      return;
+    }
 
     final oldPlayer = _player;
     final player = _shouldUseNativePlayer
@@ -1740,6 +1769,9 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
           );
     setState(() {
       _currentUrl = value;
+      _currentImageUrl = '';
+      _currentImageBytes = null;
+      _imageLoadRequestId += 1;
       _urlController.text = value;
       _castSource = source;
       _currentMediaTitle = mediaInfo.title;
@@ -1780,13 +1812,83 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
   }
 
+  Future<void> _acceptImageUrl(
+    String value, {
+    required String source,
+    required CoolCastMediaInfo mediaInfo,
+  }) async {
+    _debugLog(
+      '$source 显示图片: url=${_shortUrl(value)} '
+      'mime=${mediaInfo.mimeType.isEmpty ? '-' : mediaInfo.mimeType}',
+    );
+    final requestId = _imageLoadRequestId + 1;
+    final oldPlayer = _player;
+    await oldPlayer?.dispose();
+    _stopBiliProgressUpdates();
+    setState(() {
+      _imageLoadRequestId = requestId;
+      _player = null;
+      _currentUrl = value;
+      _currentImageUrl = value;
+      _urlController.text = value;
+      _castSource = source;
+      _currentMediaTitle = mediaInfo.title;
+      _currentMimeType = mediaInfo.mimeType.isNotEmpty
+          ? mediaInfo.mimeType
+          : _imageMimeFromUrl(value);
+      _state = PlaybackState.playing;
+      _lastMessage = '$source 已显示图片';
+      _showPlaybackControls = false;
+    });
+    Uint8List? imageBytes;
+    try {
+      imageBytes = await _fetchImageBytes(value);
+      _debugLog(
+        '$source 图片已缓存: bytes=${imageBytes.length} '
+        'head=${_shortHex(imageBytes)}',
+      );
+    } on Object catch (error) {
+      _debugLog('$source 图片缓存失败: ${_shortError(error)}');
+      if (_shouldReportImageLoadFailure(
+        requestId: requestId,
+        activeRequestId: _imageLoadRequestId,
+        requestUrl: value,
+        currentImageUrl: _currentImageUrl,
+      )) {
+        _addDebugAlert('ERR', '图片加载失败：${_shortError(error)}');
+      }
+    }
+    if (!mounted ||
+        !_shouldReportImageLoadFailure(
+          requestId: requestId,
+          activeRequestId: _imageLoadRequestId,
+          requestUrl: value,
+          currentImageUrl: _currentImageUrl,
+        )) {
+      return;
+    }
+    setState(() => _currentImageBytes = imageBytes);
+  }
+
   void _loadUrl() {
     unawaited(_acceptUrl(_urlController.text.trim(), source: '浏览器调试'));
   }
 
-  Future<void> _play() async {
+  Future<void> _play({String source = '浏览器调试'}) async {
     if (_currentUrl.isEmpty) {
+      if (_pendingDlnaUrl.isNotEmpty) {
+        await _acceptUrl(
+          _pendingDlnaUrl,
+          source: _pendingDlnaSource.isNotEmpty ? _pendingDlnaSource : source,
+          mediaInfo: _pendingDlnaMediaInfo,
+        );
+        return;
+      }
       _loadUrl();
+      return;
+    }
+    if (_currentImageUrl.isNotEmpty) {
+      setState(() => _state = PlaybackState.playing);
       return;
     }
     await _player?.play();
@@ -1825,6 +1927,25 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   }
 
   Future<void> _returnToHome() async {
+    await _stopCurrentPlayback(keepPendingDlnaUrl: false);
+  }
+
+  void _handleDlnaStop() {
+    if (!_shouldClearPlayingPageOnDlnaStop(
+      imageUrl: _currentImageUrl,
+      imageBytes: _currentImageBytes,
+    )) {
+      _debugLog('DLNA Stop ignored for active image cast');
+      setState(() {
+        _state = PlaybackState.paused;
+        _lastMessage = '图片投屏已暂停，等待下一张图片';
+      });
+      return;
+    }
+    unawaited(_stopCurrentPlayback(keepPendingDlnaUrl: true));
+  }
+
+  Future<void> _stopCurrentPlayback({required bool keepPendingDlnaUrl}) async {
     await _player?.pause();
     await _player?.dispose();
     _controlsTimer?.cancel();
@@ -1834,10 +1955,18 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     _biliNvaPlayState = _biliPlayStateIdle;
     setState(() {
       _player = null;
+      _currentImageUrl = '';
+      _currentImageBytes = null;
+      _imageLoadRequestId += 1;
       _playingPreviewVisible = false;
       _previewPosition = const Duration(minutes: 18, seconds: 42);
       _state = PlaybackState.idle;
       _currentUrl = '';
+      if (!keepPendingDlnaUrl) {
+        _pendingDlnaUrl = '';
+        _pendingDlnaSource = '';
+        _pendingDlnaMediaInfo = const CoolCastMediaInfo();
+      }
       _castSource = '等待投屏设备';
       _currentMediaTitle = '';
       _currentMimeType = '';
@@ -2044,7 +2173,12 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   Widget build(BuildContext context) {
     final player = _player;
     final isShowingVideo = player != null && player.isInitialized;
-    final isShowingPlayingPage = isShowingVideo || _playingPreviewVisible;
+    final isShowingPlayingPage = _shouldShowPlayingPage(
+      isShowingVideo: isShowingVideo,
+      isPlayingPreviewVisible: _playingPreviewVisible,
+      imageUrl: _currentImageUrl,
+      imageBytes: _currentImageBytes,
+    );
 
     return PopScope(
       canPop: false,
@@ -2068,6 +2202,8 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
                       color: Colors.black,
                       child: _PlayingPage(
                         player: isShowingVideo ? player : null,
+                        imageUrl: _currentImageUrl,
+                        imageBytes: _currentImageBytes,
                         state: _state,
                         source: _castSource,
                         fileName: _currentDisplayTitle,
@@ -3281,6 +3417,8 @@ class _RenameIconChip extends StatelessWidget {
 class _PlayingPage extends StatelessWidget {
   const _PlayingPage({
     required this.player,
+    required this.imageUrl,
+    required this.imageBytes,
     required this.state,
     required this.source,
     required this.fileName,
@@ -3301,6 +3439,8 @@ class _PlayingPage extends StatelessWidget {
   });
 
   final _CoolCastPlayer? player;
+  final String imageUrl;
+  final Uint8List? imageBytes;
   final PlaybackState state;
   final String source;
   final String fileName;
@@ -3333,7 +3473,10 @@ class _PlayingPage extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                _VideoSurface(player: player),
+                if (imageUrl.isNotEmpty || imageBytes != null)
+                  _ImageSurface(url: imageUrl, bytes: imageBytes)
+                else
+                  _VideoSurface(player: player),
                 if (showControls)
                   Positioned(
                     left: 72,
@@ -3384,6 +3527,37 @@ class _PlayingPage extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ImageSurface extends StatelessWidget {
+  const _ImageSurface({required this.url, required this.bytes});
+
+  final String url;
+  final Uint8List? bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    final imageBytes = bytes;
+    return ColoredBox(
+      key: const ValueKey('cast-image-surface'),
+      color: Colors.black,
+      child: Center(
+        child: imageBytes != null
+            ? Image.memory(imageBytes, fit: BoxFit.contain)
+            : Image.network(
+                url,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) {
+                  return const Icon(
+                    Icons.broken_image,
+                    color: Colors.white54,
+                    size: 92,
+                  );
+                },
+              ),
       ),
     );
   }
@@ -4519,6 +4693,44 @@ List<String> coolCastMediaChipsForTest({
               timelength: null,
               acceptQuality: const [],
             ),
+    );
+
+@visibleForTesting
+bool coolCastShouldShowPlayingPageForTest({
+  required bool isShowingVideo,
+  required bool isPlayingPreviewVisible,
+  String imageUrl = '',
+  Uint8List? imageBytes,
+}) =>
+    _shouldShowPlayingPage(
+      isShowingVideo: isShowingVideo,
+      isPlayingPreviewVisible: isPlayingPreviewVisible,
+      imageUrl: imageUrl,
+      imageBytes: imageBytes,
+    );
+
+@visibleForTesting
+bool coolCastShouldClearPlayingPageOnDlnaStopForTest({
+  String imageUrl = '',
+  Uint8List? imageBytes,
+}) =>
+    _shouldClearPlayingPageOnDlnaStop(
+      imageUrl: imageUrl,
+      imageBytes: imageBytes,
+    );
+
+@visibleForTesting
+bool coolCastShouldReportImageLoadFailureForTest({
+  required int requestId,
+  required int activeRequestId,
+  required String requestUrl,
+  required String currentImageUrl,
+}) =>
+    _shouldReportImageLoadFailure(
+      requestId: requestId,
+      activeRequestId: activeRequestId,
+      requestUrl: requestUrl,
+      currentImageUrl: currentImageUrl,
     );
 
 String _htmlForm({
@@ -6600,6 +6812,31 @@ List<String> _mediaChipsFor(
   return chips.isEmpty ? const ['媒体已连接'] : chips.take(3).toList();
 }
 
+bool _shouldShowPlayingPage({
+  required bool isShowingVideo,
+  required bool isPlayingPreviewVisible,
+  required String imageUrl,
+  required Uint8List? imageBytes,
+}) =>
+    isShowingVideo ||
+    isPlayingPreviewVisible ||
+    imageUrl.isNotEmpty ||
+    imageBytes != null;
+
+bool _shouldClearPlayingPageOnDlnaStop({
+  required String imageUrl,
+  required Uint8List? imageBytes,
+}) =>
+    imageUrl.isEmpty && imageBytes == null;
+
+bool _shouldReportImageLoadFailure({
+  required int requestId,
+  required int activeRequestId,
+  required String requestUrl,
+  required String currentImageUrl,
+}) =>
+    requestId == activeRequestId && requestUrl == currentImageUrl;
+
 String _videoSizeSummary(Size? size) {
   if (size == null || size.width <= 0 || size.height <= 0) {
     return '-';
@@ -6641,6 +6878,54 @@ String _mediaTypeLabel(String mimeType, String url) {
     return '';
   }
   return extension.toUpperCase();
+}
+
+bool _isImageMimeType(String mimeType) =>
+    mimeType.toLowerCase().startsWith('image/');
+
+bool _isImageUrl(String url) {
+  final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+  final extension = path.split('.').lastOrNull;
+  return const {'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'}.contains(extension);
+}
+
+String _imageMimeFromUrl(String url) {
+  final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+  final extension = path.split('.').lastOrNull;
+  return switch (extension) {
+    'jpg' || 'jpeg' => 'image/jpeg',
+    'png' => 'image/png',
+    'webp' => 'image/webp',
+    'gif' => 'image/gif',
+    'bmp' => 'image/bmp',
+    _ => '',
+  };
+}
+
+Future<Uint8List> _fetchImageBytes(String url) async {
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+  try {
+    final request = await client.getUrl(Uri.parse(url));
+    request.headers
+      ..set(HttpHeaders.userAgentHeader, _upnpServerHeader)
+      ..set(HttpHeaders.acceptHeader, 'image/*,*/*;q=0.8');
+    final response = await request.close().timeout(const Duration(seconds: 5));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw HttpException('HTTP ${response.statusCode}', uri: Uri.parse(url));
+    }
+    final contentType = response.headers.contentType?.mimeType ?? '';
+    final bytes = await consolidateHttpClientResponseBytes(response);
+    _debugLog(
+      'Image fetch contentType=${contentType.isEmpty ? '-' : contentType} '
+      'bytes=${bytes.length}',
+    );
+    if (bytes.isEmpty) {
+      throw const FormatException('empty image response');
+    }
+    return bytes;
+  } finally {
+    client.close(force: true);
+  }
 }
 
 String _shortError(Object error) {
