@@ -48,6 +48,12 @@ flutter {
     source = "../.."
 }
 
+dependencies {
+    implementation("androidx.media3:media3-exoplayer:1.9.2")
+    implementation("androidx.media3:media3-ui:1.9.2")
+    implementation("androidx.media3:media3-datasource:1.9.2")
+}
+
 fun registerCoolCastApkCopyTask(buildType: String) {
     val capitalizedBuildType = buildType.replaceFirstChar { it.uppercase() }
     val versionName = android.defaultConfig.versionName ?: "dev"

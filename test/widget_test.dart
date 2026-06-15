@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:coolcast/main.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   testWidgets('shows receiver home screen', (WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1920, 1080));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -35,6 +37,8 @@ void main() {
     expect(find.text('投屏来源'), findsOneWidget);
     expect(find.text('正在播放投屏内容'), findsOneWidget);
     expect(find.text('4K HDR'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('playing-page-background')), findsOneWidget);
 
     await tester.tap(find.byTooltip('快进'));
     await tester.pump();
@@ -101,6 +105,53 @@ void main() {
         coolCastReceiverNameForDeviceForTest('CoolCast - 客厅'), 'CoolCast - 客厅');
     expect(coolCastReceiverNameForDeviceForTest('unknown'), 'CoolCast');
     expect(coolCastReceiverNameForDeviceForTest(null), 'CoolCast');
+  });
+
+  test('native playback channel sends URL, headers, and controls', () async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(coolCastNativePlayerChannelForTest, (call) {
+      calls.add(call);
+      if (call.method == 'position') {
+        return Future<Object?>.value(12 * 1000);
+      }
+      if (call.method == 'duration') {
+        return Future<Object?>.value(98 * 1000);
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(coolCastNativePlayerChannelForTest, null);
+    });
+
+    await coolCastNativePlayerPlayForTest(
+      'https://example.com/video.mp4',
+      headers: {'Referer': 'https://www.bilibili.com'},
+      initialPosition: const Duration(seconds: 7),
+    );
+    await coolCastNativePlayerPauseForTest();
+    await coolCastNativePlayerSeekToForTest(const Duration(seconds: 34));
+
+    expect(calls[0].method, 'play');
+    expect(calls[0].arguments, {
+      'url': 'https://example.com/video.mp4',
+      'headers': {'Referer': 'https://www.bilibili.com'},
+      'initialPositionMs': 7000,
+    });
+    expect(calls[1].method, 'pause');
+    expect(calls[2].method, 'seekTo');
+    expect(calls[2].arguments, {'positionMs': 34000});
+    expect(await coolCastNativePlayerPositionForTest(),
+        const Duration(seconds: 12));
+    expect(await coolCastNativePlayerDurationForTest(),
+        const Duration(seconds: 98));
+  });
+
+  test('playing page can render native Android video surface', () {
+    final widget = coolCastNativeVideoSurfaceForTest();
+
+    expect(widget.viewType, 'coolcast/native_player');
   });
 
   test('DLNA description exposes required renderer services', () {
@@ -329,7 +380,22 @@ void main() {
 
     expect(headers['SERVER'], contains('UPnP/1.0'));
     expect(headers['SERVER'], contains('BiliTV'));
+    expect(headers['CACHE-CONTROL'], 'max-age=900');
     expect(headers['EXT'], '');
+  });
+
+  test('DLNA renderer extra probe path is handled as a normal descriptor', () {
+    expect(coolCastNormalizeHttpPathForTest('//dlna/Render/dmr_extra.xml'),
+        '/dlna/Render/dmr_extra.xml');
+    expect(coolCastNormalizeHttpUriPathForTest('//dlna/Render/dmr_extra.xml'),
+        '/dlna/Render/dmr_extra.xml');
+    expect(
+        coolCastIsDlnaRendererExtraPathForTest('//dlna/Render/dmr_extra.xml'),
+        isTrue);
+
+    final extra = coolCastDlnaRendererExtraXmlForTest();
+    expect(extra, startsWith('<?xml'));
+    expect(extra, contains('<friendlyName>CoolCast</friendlyName>'));
   });
 
   test('SSDP packets start with strict HTTPU request lines', () {
@@ -354,7 +420,43 @@ void main() {
     );
     expect(searchResponse, endsWith('\r\n\r\n'));
     expect(notify, endsWith('\r\n\r\n'));
-    expect(coolCastSsdpStartupNotifyBurstSecondsForTest(), [1, 2, 4, 8, 12]);
+    expect(searchResponse, contains('CACHE-CONTROL: max-age=900\r\n'));
+    expect(notify, contains('CACHE-CONTROL: max-age=900\r\n'));
+    expect(coolCastSsdpStartupNotifyBurstSecondsForTest(),
+        [0, 1, 2, 3, 5, 8, 12, 18, 25, 35, 50, 70]);
+    expect(coolCastSsdpNotifyIntervalSecondsForTest(), 5);
+  });
+
+  test('SSDP search responses match requested ST without flooding clients', () {
+    final rendererResponses = coolCastSsdpSearchResponsesForTest(
+      localIp: '192.168.1.18',
+      searchMessage: '''
+M-SEARCH * HTTP/1.1
+HOST: 239.255.255.250:1900
+MAN: "ssdp:discover"
+MX: 1
+ST: urn:schemas-upnp-org:device:MediaRenderer:1
+
+''',
+    );
+    final allResponses = coolCastSsdpSearchResponsesForTest(
+      localIp: '192.168.1.18',
+      searchMessage: '''
+M-SEARCH * HTTP/1.1
+HOST: 239.255.255.250:1900
+MAN: "ssdp:discover"
+MX: 1
+ST: ssdp:all
+
+''',
+    );
+
+    expect(rendererResponses, hasLength(1));
+    expect(rendererResponses.single,
+        contains('ST: urn:schemas-upnp-org:device:MediaRenderer:1'));
+    expect(rendererResponses.single,
+        isNot(contains('ST: urn:schemas-upnp-org:service:AVTransport:1')));
+    expect(allResponses.length, greaterThan(rendererResponses.length));
   });
 
   test('SSDP advertises Bilibili NirvanaControl target', () {
@@ -943,7 +1045,13 @@ void main() {
     expect(coolCastNvaFrameForTest(stop)!['attributes'], {'Command': 'Stop'});
     expect(coolCastBiliNvaControlForTest('Seek', '{"position":88}'), {
       'command': 'Seek',
+      'shouldStopPlayback': false,
       'seekSeconds': 88,
+    });
+    expect(coolCastBiliNvaControlForTest('Stop', ''), {
+      'command': 'Stop',
+      'shouldStopPlayback': true,
+      'seekSeconds': null,
     });
 
     final pauseResponse = coolCastNirvanaFrameResponseForTest(pause);

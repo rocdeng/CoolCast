@@ -52,10 +52,29 @@ const int _biliNirvanaHeartbeatResponseOp = 0xe401;
 const int _biliNirvanaShortControlOp = 0xc000;
 const int _ottBlinkPort = 8100;
 const int _nirvanaControlPort = 9958;
-const List<int> _ssdpStartupNotifyBurstSeconds = [1, 2, 4, 8, 12];
+const int _ssdpNotifyIntervalSeconds = 5;
+const List<int> _ssdpStartupNotifyBurstSeconds = [
+  0,
+  1,
+  2,
+  3,
+  5,
+  8,
+  12,
+  18,
+  25,
+  35,
+  50,
+  70,
+];
 const String _biliDescriptionPath = '/bilibili/description.xml';
+const String _ssdpDeviceUuid = 'uuid:$_biliProjectionAutoPullId';
+const String _upnpCacheControlHeader = 'max-age=900';
 const MethodChannel _deviceInfoChannel =
     MethodChannel('com.dengpeng.coolcast/device_info');
+const MethodChannel _nativePlayerChannel =
+    MethodChannel('com.dengpeng.coolcast/native_player');
+const String _nativePlayerViewType = 'coolcast/native_player';
 const String _upnpServerHeader =
     'Android/14 UPnP/1.0 BiliTV/$_biliProjectionBuild';
 
@@ -85,6 +104,198 @@ class CoolCastApp extends StatelessWidget {
 }
 
 enum PlaybackState { idle, ready, playing, paused, failed }
+
+abstract class _CoolCastPlayer {
+  bool get isInitialized;
+  Duration get position;
+  Duration get duration;
+  Size? get size;
+
+  Future<void> initialize();
+  Future<void> play();
+  Future<void> pause();
+  Future<void> seekTo(Duration position);
+  Future<void> setVolume(double volume);
+  Future<void> dispose();
+}
+
+class _FlutterVideoPlayerController implements _CoolCastPlayer {
+  _FlutterVideoPlayerController(
+    Uri uri, {
+    required Map<String, String> httpHeaders,
+  }) : _controller = VideoPlayerController.networkUrl(
+          uri,
+          httpHeaders: httpHeaders,
+        );
+
+  final VideoPlayerController _controller;
+
+  VideoPlayerController get controller => _controller;
+
+  @override
+  bool get isInitialized => _controller.value.isInitialized;
+
+  @override
+  Duration get position => _controller.value.position;
+
+  @override
+  Duration get duration => _controller.value.duration;
+
+  @override
+  Size? get size => _controller.value.size;
+
+  double get aspectRatio => _controller.value.aspectRatio;
+
+  @override
+  Future<void> initialize() => _controller.initialize();
+
+  @override
+  Future<void> play() => _controller.play();
+
+  @override
+  Future<void> pause() => _controller.pause();
+
+  @override
+  Future<void> seekTo(Duration position) => _controller.seekTo(position);
+
+  @override
+  Future<void> setVolume(double volume) => _controller.setVolume(volume);
+
+  @override
+  Future<void> dispose() => _controller.dispose();
+}
+
+class _NativePlayerController implements _CoolCastPlayer {
+  _NativePlayerController(
+    this.url, {
+    required this.httpHeaders,
+    this.initialPosition = Duration.zero,
+  });
+
+  final String url;
+  final Map<String, String> httpHeaders;
+  final Duration initialPosition;
+
+  bool _isInitialized = false;
+  Duration _lastPosition = Duration.zero;
+  Duration _lastDuration = Duration.zero;
+  Size? _lastSize;
+
+  @override
+  bool get isInitialized => _isInitialized;
+
+  @override
+  Duration get position => _lastPosition;
+
+  @override
+  Duration get duration => _lastDuration;
+
+  @override
+  Size? get size => _lastSize;
+
+  @override
+  Future<void> initialize() async {
+    await _nativePlayerPlay(
+      url,
+      headers: httpHeaders,
+      initialPosition: initialPosition,
+    );
+    _isInitialized = true;
+    await _refreshStatus();
+  }
+
+  @override
+  Future<void> play() async {
+    await _nativePlayerChannel.invokeMethod<void>('resume');
+    await _refreshStatus();
+  }
+
+  @override
+  Future<void> pause() async {
+    await _nativePlayerChannel.invokeMethod<void>('pause');
+    await _refreshStatus();
+  }
+
+  @override
+  Future<void> seekTo(Duration position) async {
+    await _nativePlayerSeekTo(position);
+    await _refreshStatus();
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    await _nativePlayerChannel.invokeMethod<void>('setVolume', {
+      'volume': volume,
+    });
+  }
+
+  @override
+  Future<void> dispose() async {
+    await _nativePlayerChannel.invokeMethod<void>('stop');
+    _isInitialized = false;
+    _lastPosition = Duration.zero;
+    _lastDuration = Duration.zero;
+    _lastSize = null;
+  }
+
+  Future<void> _refreshStatus() async {
+    _lastPosition = await _nativePlayerPosition();
+    _lastDuration = await _nativePlayerDuration();
+    _lastSize = await _nativePlayerVideoSize();
+  }
+}
+
+Future<void> _nativePlayerPlay(
+  String url, {
+  required Map<String, String> headers,
+  Duration initialPosition = Duration.zero,
+}) =>
+    _nativePlayerChannel.invokeMethod<void>('play', {
+      'url': url,
+      'headers': headers,
+      'initialPositionMs': initialPosition.inMilliseconds,
+    });
+
+Future<void> _nativePlayerSeekTo(Duration position) =>
+    _nativePlayerChannel.invokeMethod<void>('seekTo', {
+      'positionMs': position.inMilliseconds,
+    });
+
+Future<Duration> _nativePlayerPosition() async {
+  final value = await _nativePlayerChannel.invokeMethod<Object?>('position');
+  return Duration(milliseconds: _intFromNativeValue(value));
+}
+
+Future<Duration> _nativePlayerDuration() async {
+  final value = await _nativePlayerChannel.invokeMethod<Object?>('duration');
+  return Duration(milliseconds: _intFromNativeValue(value));
+}
+
+Future<Size?> _nativePlayerVideoSize() async {
+  final value = await _nativePlayerChannel.invokeMethod<Object?>('videoSize');
+  if (value is! Map) {
+    return null;
+  }
+  final width = _intFromNativeValue(value['width']);
+  final height = _intFromNativeValue(value['height']);
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+  return Size(width.toDouble(), height.toDouble());
+}
+
+int _intFromNativeValue(Object? value) {
+  if (value is int) {
+    return value;
+  }
+  if (value is double) {
+    return value.round();
+  }
+  return 0;
+}
+
+bool get _shouldUseNativePlayer =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
 enum CoolCastUpnpService {
   avTransport('urn:schemas-upnp-org:service:AVTransport:1'),
@@ -269,7 +480,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
   final List<Timer> _startupNotifyTimers = [];
   Timer? _controlsTimer;
   Timer? _biliProgressTimer;
-  VideoPlayerController? _player;
+  _CoolCastPlayer? _player;
   PlaybackState _state = PlaybackState.idle;
   String _currentUrl = '';
   String _castSource = '等待投屏设备';
@@ -415,8 +626,9 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         '$requestLabel headers=${_httpRequestHeaderSummary(request)}',
       );
       _applyUpnpResponseHeaders(request.response.headers);
-      if (request.uri.path == '/description.xml' ||
-          request.uri.path == _biliDescriptionPath) {
+      final normalizedPath = _normalizeHttpUriPath(request.uri);
+      if (normalizedPath == '/description.xml' ||
+          normalizedPath == _biliDescriptionPath) {
         await _sendTextResponse(
           request.response,
           _deviceDescription(_localIp, _receiverName),
@@ -427,7 +639,18 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
-      if (request.uri.path == '/AVTransport/scpd.xml') {
+      if (_isDlnaRendererExtraPath(normalizedPath)) {
+        await _sendTextResponse(
+          request.response,
+          _dlnaRendererExtraXml(_receiverName),
+          contentType: ContentType('text', 'xml', charset: 'utf-8'),
+          debugLabel: requestLabel,
+          stopwatch: stopwatch,
+        );
+        return;
+      }
+
+      if (normalizedPath == '/AVTransport/scpd.xml') {
         await _sendTextResponse(
           request.response,
           _avTransportScpd(),
@@ -438,7 +661,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
-      if (request.uri.path == '/RenderingControl/scpd.xml') {
+      if (normalizedPath == '/RenderingControl/scpd.xml') {
         await _sendTextResponse(
           request.response,
           _renderingControlScpd(),
@@ -449,7 +672,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
-      if (request.uri.path == '/ConnectionManager/scpd.xml') {
+      if (normalizedPath == '/ConnectionManager/scpd.xml') {
         await _sendTextResponse(
           request.response,
           _connectionManagerScpd(),
@@ -460,7 +683,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
-      if (request.uri.path == '/NirvanaControl/scpd.xml') {
+      if (normalizedPath == '/NirvanaControl/scpd.xml') {
         await _sendTextResponse(
           request.response,
           _nirvanaControlScpd(),
@@ -480,27 +703,27 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
-      if (request.uri.path == '/AVTransport/control') {
+      if (normalizedPath == '/AVTransport/control') {
         await _handleAvTransport(request);
         return;
       }
 
-      if (request.uri.path == '/RenderingControl/control') {
+      if (normalizedPath == '/RenderingControl/control') {
         await _handleRenderingControl(request);
         return;
       }
 
-      if (request.uri.path == '/ConnectionManager/control') {
+      if (normalizedPath == '/ConnectionManager/control') {
         await _handleConnectionManager(request);
         return;
       }
 
-      if (request.uri.path == '/NirvanaControl/control') {
+      if (normalizedPath == '/NirvanaControl/control') {
         await _handleNirvanaHttpControl(request);
         return;
       }
 
-      if (request.uri.path == '/cast') {
+      if (normalizedPath == '/cast') {
         final url = request.uri.queryParameters['url']?.trim() ?? '';
         final accepted = _isValidCastUrl(url);
         unawaited(
@@ -517,7 +740,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
 
-      if (request.uri.path == '/') {
+      if (normalizedPath == '/') {
         await _sendTextResponse(
           request.response,
           _htmlForm(
@@ -532,7 +755,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
 
       _addDebugAlert(
         'ERR',
-        '未知请求：${request.method} ${_shortPath(request.uri)}',
+        '未知请求：${request.method} ${_shortText(normalizedPath)}',
       );
       await _sendTextResponse(
         request.response,
@@ -611,10 +834,10 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       InternetAddress.anyIPv4,
       1900,
       reuseAddress: true,
-      reusePort: true,
     );
     _ssdpSocket = socket;
-    socket.multicastHops = 4;
+    socket.multicastHops = 8;
+    socket.broadcastEnabled = true;
     socket.joinMulticast(InternetAddress('239.255.255.250'));
     socket.listen((event) {
       if (event != RawSocketEvent.read) {
@@ -629,13 +852,24 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         return;
       }
       _recordSsdpSearch(datagram.address.address);
-      if (!_matchesSearchTarget(message)) {
+      final responses = _ssdpSearchResponses(address, message);
+      _debugLog(
+        'SSDP M-SEARCH from ${datagram.address.address}:${datagram.port} '
+        'st=${_ssdpSearchTarget(message) ?? '<none>'} '
+        'responses=${responses.length}',
+      );
+      if (responses.isEmpty) {
         return;
       }
-      _sendSsdpSearchResponse(socket, datagram.address, datagram.port, address);
+      // Add random delay (0-100ms) to avoid response collision
+      final delayMs = (DateTime.now().microsecondsSinceEpoch % 100);
+      Future<void>.delayed(Duration(milliseconds: delayMs), () {
+        _sendSsdpSearchResponse(
+            socket, datagram.address, datagram.port, responses);
+      });
     });
     _notifyTimer = Timer.periodic(
-      const Duration(seconds: 30),
+      const Duration(seconds: _ssdpNotifyIntervalSeconds),
       (_) => _sendSsdpNotify(socket, address),
     );
     _sendSsdpNotify(socket, address);
@@ -666,7 +900,6 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       InternetAddress.anyIPv4,
       _ottBlinkPort,
       reuseAddress: true,
-      reusePort: true,
     );
     _ottBlinkSocket = socket;
     socket.broadcastEnabled = true;
@@ -890,7 +1123,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
               requester: requester,
             ));
           } else {
-            _handleBiliNvaPlaybackCommand(
+            await _handleBiliNvaPlaybackCommand(
               nvaFrame.attributes['Command'],
               nvaFrame.bodyText,
               requester: requester,
@@ -902,7 +1135,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
             requester: requester,
           ));
         } else {
-          _handleBiliNvaPlaybackCommand(
+          await _handleBiliNvaPlaybackCommand(
             nvaFrame.attributes['Command'],
             nvaFrame.bodyText,
             requester: requester,
@@ -991,17 +1224,17 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     );
   }
 
-  void _handleBiliNvaPlaybackCommand(
+  Future<void> _handleBiliNvaPlaybackCommand(
     String? command,
     String body, {
     required String requester,
-  }) {
+  }) async {
     switch (command) {
       case 'Pause':
         _debugLog('B站 Pause from $requester');
         _recordNirvanaControl(requester, 'Pause');
         _biliNvaPlayState = _biliPlayStatePaused;
-        unawaited(_pause());
+        await _pause();
         _sendBiliPlaybackStateEvent(_biliPlayStatePaused);
         break;
       case 'Resume':
@@ -1009,7 +1242,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
         _debugLog('B站 Resume from $requester');
         _recordNirvanaControl(requester, command ?? 'Resume');
         _biliNvaPlayState = _biliPlayStatePlaying;
-        unawaited(_play());
+        await _play();
         _sendBiliPlaybackStateEvent(_biliPlayStatePlaying);
         break;
       case 'Seek':
@@ -1021,13 +1254,14 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
           position == null ? 'Seek 参数不可用' : 'Seek ${position.inSeconds}s',
         );
         if (position != null) {
-          unawaited(_seekTo(position));
+          await _seekTo(position);
           _sendBiliProgressEvent(position);
         }
         break;
       case 'Stop':
-        _debugLog('B站 Stop from $requester: ACK only');
-        _recordNirvanaControl(requester, 'Stop ACK');
+        _debugLog('B站 Stop from $requester: stopping playback');
+        _recordNirvanaControl(requester, 'Stop');
+        await _returnToHome();
         break;
     }
   }
@@ -1047,8 +1281,8 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
 
     final player = _player;
-    final position = player?.value.isInitialized == true
-        ? player!.value.position
+    final position = player != null && player.isInitialized
+        ? await _playerPosition(player)
         : Duration.zero;
     final play = latestPlay.copyWith(
       qn: qn,
@@ -1166,15 +1400,19 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     _biliProgressTimer?.cancel();
     _biliProgressTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final player = _player;
-      if (player == null || !player.value.isInitialized) {
+      if (player == null || !player.isInitialized) {
         return;
       }
-      _sendBiliProgressEvent(player.value.position);
+      unawaited(_sendCurrentBiliProgressEvent(player));
     });
     final player = _player;
-    if (player != null && player.value.isInitialized) {
-      _sendBiliProgressEvent(player.value.position);
+    if (player != null && player.isInitialized) {
+      unawaited(_sendCurrentBiliProgressEvent(player));
     }
+  }
+
+  Future<void> _sendCurrentBiliProgressEvent(_CoolCastPlayer player) async {
+    _sendBiliProgressEvent(await _playerPosition(player));
   }
 
   void _stopBiliProgressUpdates() {
@@ -1200,28 +1438,16 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
   }
 
-  bool _matchesSearchTarget(String message) {
-    final upper = message.toUpperCase();
-    return upper.contains('SSDP:ALL') ||
-        upper.contains('MEDIASERVER') ||
-        upper.contains('MEDIARENDERER') ||
-        upper.contains('AVTRANSPORT') ||
-        upper.contains('RENDERINGCONTROL') ||
-        upper.contains('CONNECTIONMANAGER') ||
-        upper.contains('UPNP:ROOTDEVICE');
-  }
-
   void _sendSsdpSearchResponse(
     RawDatagramSocket socket,
     InternetAddress address,
     int port,
-    String localIp,
+    List<String> responses,
   ) {
-    for (final target in _ssdpTargets) {
-      final response = _ssdpSearchResponse(localIp, target);
+    for (final response in responses) {
       socket.send(utf8.encode(response), address, port);
     }
-    _recordSsdpResponse(_ssdpTargets.length);
+    _recordSsdpResponse(responses.length);
   }
 
   void _sendSsdpNotify(RawDatagramSocket socket, String localIp) {
@@ -1501,12 +1727,17 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       return;
     }
 
-    final parsed = Uri.parse(value);
     final oldPlayer = _player;
-    final player = VideoPlayerController.networkUrl(
-      parsed,
-      httpHeaders: httpHeaders,
-    );
+    final player = _shouldUseNativePlayer
+        ? _NativePlayerController(
+            value,
+            httpHeaders: httpHeaders,
+            initialPosition: initialPosition,
+          )
+        : _FlutterVideoPlayerController(
+            Uri.parse(value),
+            httpHeaders: httpHeaders,
+          );
     setState(() {
       _currentUrl = value;
       _urlController.text = value;
@@ -1520,14 +1751,14 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     try {
       await player.initialize();
       await player.setVolume(_isMuted ? 0 : _volume);
-      if (initialPosition > Duration.zero) {
+      if (!_shouldUseNativePlayer && initialPosition > Duration.zero) {
         await player.seekTo(initialPosition);
       }
       final urlQuality = _qualityLabelFromUrl(value);
       _debugLog(
         '$source 播放器已初始化: url=${_shortUrl(value)} '
         'urlQuality=${urlQuality.isEmpty ? '-' : urlQuality} '
-        'videoSize=${_videoSizeSummary(player.value.size)} '
+        'videoSize=${_videoSizeSummary(player.size)} '
         'biliQuality=${_latestBiliCastStatus?.quality ?? '-'}',
       );
       await oldPlayer?.dispose();
@@ -1598,6 +1829,9 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     await _player?.dispose();
     _controlsTimer?.cancel();
     _stopBiliProgressUpdates();
+    _latestBiliCastStatus = null;
+    _latestBiliNvaPlayRequest = null;
+    _biliNvaPlayState = _biliPlayStateIdle;
     setState(() {
       _player = null;
       _playingPreviewVisible = false;
@@ -1614,7 +1848,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
 
   Future<void> _seekBy(Duration offset) async {
     final player = _player;
-    if (player == null || !player.value.isInitialized) {
+    if (player == null || !player.isInitialized) {
       if (_playingPreviewVisible) {
         setState(() {
           final next = _previewPosition + offset;
@@ -1629,8 +1863,8 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       }
       return;
     }
-    final duration = player.value.duration;
-    final current = player.value.position;
+    final duration = await _playerDuration(player);
+    final current = await _playerPosition(player);
     var target = current + offset;
     if (target < Duration.zero) {
       target = Duration.zero;
@@ -1644,7 +1878,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
 
   Future<void> _seekTo(Duration target) async {
     final player = _player;
-    if (player == null || !player.value.isInitialized) {
+    if (player == null || !player.isInitialized) {
       if (_playingPreviewVisible) {
         setState(() {
           if (target < Duration.zero) {
@@ -1658,7 +1892,7 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
       }
       return;
     }
-    final duration = player.value.duration;
+    final duration = await _playerDuration(player);
     var next = target;
     if (next < Duration.zero) {
       next = Duration.zero;
@@ -1668,6 +1902,20 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     }
     await player.seekTo(next);
     _revealControls();
+  }
+
+  Future<Duration> _playerPosition(_CoolCastPlayer player) async {
+    if (player is _NativePlayerController) {
+      return _nativePlayerPosition();
+    }
+    return player.position;
+  }
+
+  Future<Duration> _playerDuration(_CoolCastPlayer player) async {
+    if (player is _NativePlayerController) {
+      return _nativePlayerDuration();
+    }
+    return player.duration;
   }
 
   void _revealControls() {
@@ -1794,9 +2042,8 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final playerValue = _player?.value;
-    final isShowingVideo =
-        _player != null && playerValue != null && playerValue.isInitialized;
+    final player = _player;
+    final isShowingVideo = player != null && player.isInitialized;
     final isShowingPlayingPage = isShowingVideo || _playingPreviewVisible;
 
     return PopScope(
@@ -1816,29 +2063,33 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
               ? Stack(
                   fit: StackFit.expand,
                   children: [
-                    _PlayingPage(
-                      player: isShowingVideo ? _player : null,
-                      state: _state,
-                      source: _castSource,
-                      fileName: _currentDisplayTitle,
-                      connection: _connectionSummary,
-                      mediaChips: _currentMediaChips(playerValue),
-                      previewPosition: _previewPosition,
-                      previewDuration: _previewDuration,
-                      showControls:
-                          _showPlaybackControls || _playingPreviewVisible,
-                      isMuted: _isMuted,
-                      onBack: _returnToHome,
-                      onShowControls: _revealControls,
-                      onPlayPause:
-                          _state == PlaybackState.playing ? _pause : _play,
-                      onSeekBackwardLarge: () =>
-                          _seekBy(const Duration(seconds: -30)),
-                      onRewind: () => _seekBy(const Duration(seconds: -10)),
-                      onForward: () => _seekBy(const Duration(seconds: 10)),
-                      onSeekForwardLarge: () =>
-                          _seekBy(const Duration(seconds: 30)),
-                      onToggleMute: _toggleMute,
+                    ColoredBox(
+                      key: const ValueKey('playing-page-background'),
+                      color: Colors.black,
+                      child: _PlayingPage(
+                        player: isShowingVideo ? player : null,
+                        state: _state,
+                        source: _castSource,
+                        fileName: _currentDisplayTitle,
+                        connection: _connectionSummary,
+                        mediaChips: _currentMediaChips(player),
+                        previewPosition: _previewPosition,
+                        previewDuration: _previewDuration,
+                        showControls:
+                            _showPlaybackControls || _playingPreviewVisible,
+                        isMuted: _isMuted,
+                        onBack: _returnToHome,
+                        onShowControls: _revealControls,
+                        onPlayPause:
+                            _state == PlaybackState.playing ? _pause : _play,
+                        onSeekBackwardLarge: () =>
+                            _seekBy(const Duration(seconds: -30)),
+                        onRewind: () => _seekBy(const Duration(seconds: -10)),
+                        onForward: () => _seekBy(const Duration(seconds: 10)),
+                        onSeekForwardLarge: () =>
+                            _seekBy(const Duration(seconds: 30)),
+                        onToggleMute: _toggleMute,
+                      ),
                     ),
                     _DebugAlertOverlay(alerts: _debugAlerts),
                   ],
@@ -1894,14 +2145,14 @@ class _ReceiverHomePageState extends State<ReceiverHomePage> {
     return '远端媒体';
   }
 
-  List<String> _currentMediaChips(VideoPlayerValue? value) =>
+  List<String> _currentMediaChips(_CoolCastPlayer? player) =>
       _playingPreviewVisible
           ? const ['4K HDR', 'HEVC', '5.1 Audio']
           : _mediaChipsFor(
               _currentUrl,
               _currentMimeType,
               _state,
-              value?.size,
+              player?.size,
               biliStatus: _latestBiliCastStatus,
             );
 
@@ -3049,7 +3300,7 @@ class _PlayingPage extends StatelessWidget {
     required this.onToggleMute,
   });
 
-  final VideoPlayerController? player;
+  final _CoolCastPlayer? player;
   final PlaybackState state;
   final String source;
   final String fileName;
@@ -3141,21 +3392,24 @@ class _PlayingPage extends StatelessWidget {
 class _VideoSurface extends StatelessWidget {
   const _VideoSurface({required this.player});
 
-  final VideoPlayerController? player;
+  final _CoolCastPlayer? player;
 
   @override
   Widget build(BuildContext context) {
     final videoPlayer = player;
-    if (videoPlayer != null && videoPlayer.value.isInitialized) {
-      final aspectRatio = videoPlayer.value.aspectRatio == 0
-          ? 16 / 9
-          : videoPlayer.value.aspectRatio;
+    if (videoPlayer is _NativePlayerController && videoPlayer.isInitialized) {
+      return const AndroidView(viewType: _nativePlayerViewType);
+    }
+    if (videoPlayer is _FlutterVideoPlayerController &&
+        videoPlayer.isInitialized) {
+      final aspectRatio =
+          videoPlayer.aspectRatio == 0 ? 16 / 9 : videoPlayer.aspectRatio;
       return DecoratedBox(
         decoration: const BoxDecoration(color: Colors.black),
         child: Center(
           child: AspectRatio(
             aspectRatio: aspectRatio,
-            child: VideoPlayer(videoPlayer),
+            child: VideoPlayer(videoPlayer.controller),
           ),
         ),
       );
@@ -3503,7 +3757,7 @@ class _PlaybackControlBar extends StatelessWidget {
     required this.onToggleMute,
   });
 
-  final VideoPlayerController? player;
+  final _CoolCastPlayer? player;
   final PlaybackState state;
   final Duration previewPosition;
   final Duration previewDuration;
@@ -3517,9 +3771,9 @@ class _PlaybackControlBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final value = player?.value;
-    final position = value?.position ?? previewPosition;
-    final duration = value?.duration ?? previewDuration;
+    final currentPlayer = player;
+    final position = currentPlayer?.position ?? previewPosition;
+    final duration = currentPlayer?.duration ?? previewDuration;
 
     return _GlassCard(
       cornerRadius: 34,
@@ -3900,6 +4154,47 @@ String coolCastHtmlResponseForTest(String url, {required bool isAccepted}) =>
 String coolCastDeviceDescriptionForTest(String ip, String receiverName) =>
     _deviceDescription(ip, receiverName);
 
+String coolCastNormalizeHttpPathForTest(String path) =>
+    _normalizeHttpPath(path);
+
+String coolCastNormalizeHttpUriPathForTest(String uri) =>
+    _normalizeHttpUriPath(Uri.parse(uri));
+
+bool coolCastIsDlnaRendererExtraPathForTest(String path) =>
+    _isDlnaRendererExtraPath(_normalizeHttpPath(path));
+
+String coolCastDlnaRendererExtraXmlForTest(
+        {String receiverName = 'CoolCast'}) =>
+    _dlnaRendererExtraXml(receiverName);
+
+MethodChannel get coolCastNativePlayerChannelForTest => _nativePlayerChannel;
+
+Future<void> coolCastNativePlayerPlayForTest(
+  String url, {
+  Map<String, String> headers = const {},
+  Duration initialPosition = Duration.zero,
+}) =>
+    _nativePlayerPlay(
+      url,
+      headers: headers,
+      initialPosition: initialPosition,
+    );
+
+Future<void> coolCastNativePlayerPauseForTest() =>
+    _nativePlayerChannel.invokeMethod<void>('pause');
+
+Future<void> coolCastNativePlayerSeekToForTest(Duration position) =>
+    _nativePlayerSeekTo(position);
+
+Future<Duration> coolCastNativePlayerPositionForTest() =>
+    _nativePlayerPosition();
+
+Future<Duration> coolCastNativePlayerDurationForTest() =>
+    _nativePlayerDuration();
+
+AndroidView coolCastNativeVideoSurfaceForTest() =>
+    const AndroidView(viewType: _nativePlayerViewType);
+
 String coolCastSoapResponseForTest(
   String action, {
   CoolCastUpnpService service = CoolCastUpnpService.avTransport,
@@ -3925,11 +4220,21 @@ List<int> coolCastSsdpStartupNotifyBurstSecondsForTest() =>
     _ssdpStartupNotifyBurstSeconds;
 
 @visibleForTesting
+int coolCastSsdpNotifyIntervalSecondsForTest() => _ssdpNotifyIntervalSeconds;
+
+@visibleForTesting
 String coolCastSsdpSearchResponseForTest({
   required String localIp,
   required String target,
 }) =>
     _ssdpSearchResponse(localIp, target);
+
+@visibleForTesting
+List<String> coolCastSsdpSearchResponsesForTest({
+  required String localIp,
+  required String searchMessage,
+}) =>
+    _ssdpSearchResponses(localIp, searchMessage);
 
 @visibleForTesting
 String coolCastSsdpNotifyForTest({
@@ -4003,6 +4308,7 @@ Map<String, Object?>? coolCastBiliNvaControlForTest(
 ) {
   return {
     'command': command,
+    'shouldStopPlayback': command == 'Stop',
     'seekSeconds': _biliSeekPositionFromBody(body)?.inSeconds,
   };
 }
@@ -4356,15 +4662,31 @@ String _deviceDescription(String ip, String receiverName) {
 ''';
 }
 
+String _dlnaRendererExtraXml(String receiverName) {
+  final friendlyName = xmlEscape(_biliFriendlyName(receiverName));
+  return '''
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <device>
+    <friendlyName>$friendlyName</friendlyName>
+    <manufacturer>$_biliProjectionManufacturer</manufacturer>
+    <modelName>$_biliProjectionModelName</modelName>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+    <dlnaDoc>DMR-1.50</dlnaDoc>
+  </device>
+</root>
+''';
+}
+
 String _ssdpSearchResponse(String localIp, String target) {
   return '''
 HTTP/1.1 200 OK\r
-CACHE-CONTROL: max-age=1800\r
+CACHE-CONTROL: $_upnpCacheControlHeader\r
 EXT:\r
 LOCATION: http://$localIp:7788$_biliDescriptionPath\r
 SERVER: $_upnpServerHeader\r
 ST: $target\r
-USN: uuid:$_biliProjectionAutoPullId::$target\r
+USN: ${_ssdpUsn(target)}\r
 \r
 ''';
 }
@@ -4373,14 +4695,47 @@ String _ssdpNotify(String localIp, String target) {
   return '''
 NOTIFY * HTTP/1.1\r
 HOST: 239.255.255.250:1900\r
-CACHE-CONTROL: max-age=1800\r
+CACHE-CONTROL: $_upnpCacheControlHeader\r
 LOCATION: http://$localIp:7788$_biliDescriptionPath\r
 NT: $target\r
 NTS: ssdp:alive\r
 SERVER: $_upnpServerHeader\r
-USN: uuid:$_biliProjectionAutoPullId::$target\r
+USN: ${_ssdpUsn(target)}\r
 \r
 ''';
+}
+
+String _ssdpUsn(String target) {
+  if (target.toLowerCase() == _ssdpDeviceUuid.toLowerCase()) {
+    return _ssdpDeviceUuid;
+  }
+  return '$_ssdpDeviceUuid::$target';
+}
+
+List<String> _ssdpSearchResponses(String localIp, String message) {
+  final target = _ssdpSearchTarget(message);
+  if (target == null) {
+    return const [];
+  }
+  final lowerTarget = target.toLowerCase();
+  final targets = lowerTarget == 'ssdp:all'
+      ? _ssdpTargets
+      : _ssdpTargets.where(
+          (candidate) => candidate.toLowerCase() == lowerTarget,
+        );
+  return [
+    for (final target in targets) _ssdpSearchResponse(localIp, target),
+  ];
+}
+
+String? _ssdpSearchTarget(String message) {
+  final match = RegExp(
+    r'^ST\s*:\s*([^\r\n]+)',
+    caseSensitive: false,
+    multiLine: true,
+  ).firstMatch(message);
+  final value = match?.group(1)?.trim();
+  return value == null || value.isEmpty ? null : value;
 }
 
 bool _isOttBlinkSearch(Uint8List data) {
@@ -5648,6 +6003,22 @@ String _httpRequestHeaderSummary(HttpRequest request) {
   return headers.isEmpty ? '<none>' : headers.join('; ');
 }
 
+String _normalizeHttpPath(String path) {
+  final normalized = path.replaceAll(RegExp(r'/+'), '/');
+  return normalized.isEmpty ? '/' : normalized;
+}
+
+String _normalizeHttpUriPath(Uri uri) {
+  final authority = uri.authority;
+  if (authority.isEmpty) {
+    return _normalizeHttpPath(uri.path);
+  }
+  return _normalizeHttpPath('/$authority/${uri.path}');
+}
+
+bool _isDlnaRendererExtraPath(String path) =>
+    path.toLowerCase() == '/dlna/render/dmr_extra.xml';
+
 String _shortHex(Uint8List data) {
   return data
       .take(64)
@@ -5664,7 +6035,7 @@ void _debugLog(String message) {
 Map<String, String> _upnpResponseHeaders() => const {
       'SERVER': _upnpServerHeader,
       'EXT': '',
-      'CACHE-CONTROL': 'max-age=1800',
+      'CACHE-CONTROL': _upnpCacheControlHeader,
       'X-User-Agent': _upnpServerHeader,
     };
 
@@ -5924,7 +6295,7 @@ bool _isUpnpEventSubscription(HttpRequest request) {
   if (method != 'SUBSCRIBE' && method != 'UNSUBSCRIBE') {
     return false;
   }
-  return _upnpEventPaths.contains(request.uri.path);
+  return _upnpEventPaths.contains(_normalizeHttpUriPath(request.uri));
 }
 
 const Set<String> _upnpEventPaths = {
@@ -5993,10 +6364,9 @@ String _transportInfoResponse(PlaybackState state) {
 ''';
 }
 
-String _positionInfoResponse(VideoPlayerController? player) {
-  final value = player?.value;
-  final position = value?.position ?? Duration.zero;
-  final duration = value?.duration ?? Duration.zero;
+String _positionInfoResponse(_CoolCastPlayer? player) {
+  final position = player?.position ?? Duration.zero;
+  final duration = player?.duration ?? Duration.zero;
   return '''
 <?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
@@ -6017,8 +6387,8 @@ String _positionInfoResponse(VideoPlayerController? player) {
 ''';
 }
 
-String _mediaInfoResponse(VideoPlayerController? player, String currentUrl) {
-  final duration = player?.value.duration ?? Duration.zero;
+String _mediaInfoResponse(_CoolCastPlayer? player, String currentUrl) {
+  final duration = player?.duration ?? Duration.zero;
   return _soapResponse(
     'GetMediaInfoResponse',
     body: '''
@@ -6230,8 +6600,8 @@ List<String> _mediaChipsFor(
   return chips.isEmpty ? const ['媒体已连接'] : chips.take(3).toList();
 }
 
-String _videoSizeSummary(Size size) {
-  if (size.width <= 0 || size.height <= 0) {
+String _videoSizeSummary(Size? size) {
+  if (size == null || size.width <= 0 || size.height <= 0) {
     return '-';
   }
   return '${size.width.round()}x${size.height.round()}';
@@ -6289,12 +6659,12 @@ String _shortUrl(String value) {
   return '${text.substring(0, 42)}...${text.substring(text.length - 18)}';
 }
 
-String _shortPath(Uri uri) {
-  final text = uri.toString();
-  if (text.length <= 80) {
+String _shortText(String value, {int maxLength = 80}) {
+  final text = value.trim();
+  if (text.length <= maxLength) {
     return text;
   }
-  return '${text.substring(0, 56)}...${text.substring(text.length - 18)}';
+  return '${text.substring(0, maxLength - 24)}...${text.substring(text.length - 18)}';
 }
 
 String _soapActionSummary(String body) {
@@ -6692,6 +7062,7 @@ String xmlEscape(String value) {
 
 const List<String> _ssdpTargets = [
   'upnp:rootdevice',
+  _ssdpDeviceUuid,
   'urn:schemas-upnp-org:device:MediaRenderer:1',
   'urn:schemas-upnp-org:service:AVTransport:1',
   'urn:schemas-upnp-org:service:RenderingControl:1',
