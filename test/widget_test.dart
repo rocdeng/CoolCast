@@ -152,6 +152,27 @@ void main() {
     expect(find.byTooltip('暂停'), findsNothing);
   });
 
+  testWidgets('playing page exposes a tap layer for controls',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1920, 1080));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var taps = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PlayingPageForTest(
+            showControls: false,
+            onShowControls: () => taps += 1,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const ValueKey('playing-page-tap-layer')));
+    expect(taps, 1);
+  });
+
   testWidgets('playing page renders cast images', (WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1920, 1080));
     addTearDown(() => tester.binding.setSurfaceSize(null));

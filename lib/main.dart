@@ -438,11 +438,13 @@ class PlayingPageForTest extends StatelessWidget {
     required this.showControls,
     this.imageUrl = '',
     this.imageBytes,
+    this.onShowControls,
   });
 
   final bool showControls;
   final String imageUrl;
   final Uint8List? imageBytes;
+  final VoidCallback? onShowControls;
 
   @override
   Widget build(BuildContext context) {
@@ -460,7 +462,7 @@ class PlayingPageForTest extends StatelessWidget {
       showControls: showControls,
       isMuted: false,
       onBack: () {},
-      onShowControls: () {},
+      onShowControls: onShowControls ?? () {},
       onPlayPause: () {},
       onSeekBackwardLarge: () {},
       onRewind: () {},
@@ -3477,6 +3479,13 @@ class _PlayingPage extends StatelessWidget {
                   _ImageSurface(url: imageUrl, bytes: imageBytes)
                 else
                   _VideoSurface(player: player),
+                Positioned.fill(
+                  child: GestureDetector(
+                    key: const ValueKey('playing-page-tap-layer'),
+                    behavior: HitTestBehavior.translucent,
+                    onTap: onShowControls,
+                  ),
+                ),
                 if (showControls)
                   Positioned(
                     left: 72,
