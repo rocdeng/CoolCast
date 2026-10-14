@@ -10,6 +10,7 @@ CoolCast 是一个面向 Android TV 的清爽投屏接收端。它以 TV 待命�
 - 投屏名称本地持久化
 - 局域网 HTTP 投送入口：`http://TV-IP:7788/`
 - URL 快速投送接口：`http://TV-IP:7788/cast?url=视频地址`
+- 局域网远程安装 APK 入口：待命页左下角“远程安装”弹窗二维码 / `http://TV-IP:7788/install`
 - DLNA/UPnP MediaRenderer 基础发现
 - DLNA `SetAVTransportURI` / `Play` / `Pause` / `Stop` 基础控制
 - 收到媒体 URL 后自动播放

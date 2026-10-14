@@ -5,3 +5,5 @@
 build/
 android/.gradle/
 android/app/build/
+tmp
+.gradle-home/

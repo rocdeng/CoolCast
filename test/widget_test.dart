@@ -84,54 +84,51 @@ void main() {
 
     await tester.pumpWidget(const CoolCastApp());
 
-    expect(find.text('当前连接网络'), findsOneWidget);
-    expect(find.text('可用投屏方式'), findsOneWidget);
-    expect(find.text('设备名称'), findsOneWidget);
-    expect(find.text('正在等待投屏连接'), findsOneWidget);
-    expect(find.text('DLNA / UPnP'), findsOneWidget);
-    expect(find.text('发现状态'), findsOneWidget);
-    expect(find.text('未收到搜索'), findsOneWidget);
+    final designImage = tester.widget<Image>(
+      find.byKey(const ValueKey('waiting-design-background')),
+    );
+    expect(
+      designImage.image,
+      isA<AssetImage>().having(
+        (image) => image.assetName,
+        'asset name',
+        'assets/images/coolcast_waiting_16x9_base.png',
+      ),
+    );
+    expect(find.text('CoolCast'), findsOneWidget);
+    final receiverNameText = tester.widget<Text>(
+      find.byKey(const ValueKey('receiver-name-text')),
+    );
+    expect(receiverNameText.style?.fontSize, 50);
+    expect(find.text('Wi-Fi：当前局域网'), findsOneWidget);
+    expect(find.text('IP：TV-IP'), findsOneWidget);
+    expect(find.text('发现：未收到搜索'), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('waiting-floating-bubbles')), findsOneWidget);
+    expect(find.byTooltip('修改投屏名称'), findsOneWidget);
+    expect(find.text('预览播放界面'), findsNothing);
   });
 
-  testWidgets('opens playing preview from debug home screen',
+  testWidgets('debug preview button is hidden on receiver home screen',
       (WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1920, 1080));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(const CoolCastApp());
-    await tester.tap(find.text('预览播放界面'));
-    await tester.pump();
 
-    expect(find.text('返回'), findsOneWidget);
-    expect(find.text('投屏来源'), findsOneWidget);
-    expect(find.text('正在播放投屏内容'), findsOneWidget);
-    expect(find.text('4K HDR'), findsOneWidget);
-    expect(
-        find.byKey(const ValueKey('playing-page-background')), findsOneWidget);
+    expect(find.text('预览播放界面'), findsNothing);
+  });
 
-    await tester.tap(find.byTooltip('快进'));
-    await tester.pump();
-    expect(find.text('18:52'), findsOneWidget);
+  test('floating bubbles use varied random starting positions', () {
+    final first = coolCastRandomBubbleStartsForTest(1);
+    final second = coolCastRandomBubbleStartsForTest(2);
 
-    await tester.tap(find.byTooltip('暂停'));
-    await tester.pump();
-    expect(find.byIcon(Icons.play_arrow), findsOneWidget);
-
-    await tester.sendKeyEvent(LogicalKeyboardKey.select);
-    await tester.pump();
-    expect(find.byIcon(Icons.pause), findsOneWidget);
-
-    await tester.tap(find.byTooltip('静音'));
-    await tester.pump();
-    expect(find.byTooltip('取消静音'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('后退 30 秒'));
-    await tester.pump();
-    expect(find.text('18:22'), findsOneWidget);
-
-    await tester.tap(find.text('返回'));
-    await tester.pump();
-    expect(find.text('当前连接网络'), findsOneWidget);
+    expect(first, isNot(equals(second)));
+    expect(first.toSet(), hasLength(first.length));
+    for (final position in first) {
+      expect(position.dx, inInclusiveRange(420, 1400));
+      expect(position.dy, inInclusiveRange(400, 820));
+    }
   });
 
   testWidgets('playing chrome hides with controls',
@@ -150,6 +147,50 @@ void main() {
     expect(find.text('返回'), findsNothing);
     expect(find.text('投屏来源'), findsNothing);
     expect(find.byTooltip('暂停'), findsNothing);
+  });
+
+  testWidgets('playing controls use the simplified toolbar',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1920, 1080));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: PlayingPageForTest(showControls: true),
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('后退 10 秒'), findsOneWidget);
+    expect(find.byTooltip('暂停'), findsOneWidget);
+    expect(find.byTooltip('前进 10 秒'), findsOneWidget);
+    expect(find.byTooltip('后退 30 秒'), findsNothing);
+    expect(find.byTooltip('前进 30 秒'), findsNothing);
+    expect(find.byTooltip('静音'), findsNothing);
+    expect(find.text('1080p'), findsNothing);
+    expect(find.text('MP4'), findsNothing);
+  });
+
+  testWidgets('playing info card shows DLNA video information',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1920, 1080));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: PlayingPageForTest(
+            showControls: true,
+            mediaChips: ['1080p', 'MP4', '8.0 Mbps'],
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('1080p'), findsOneWidget);
+    expect(find.text('MP4'), findsOneWidget);
+    expect(find.text('8.0 Mbps'), findsOneWidget);
   });
 
   testWidgets('playing page exposes a tap layer for controls',
@@ -231,7 +272,38 @@ void main() {
     expect(coolCastShouldClearPlayingPageOnDlnaStopForTest(), isTrue);
   });
 
-  test('stale image load failures do not show debug alerts', () {
+  test('DLNA stop immediately after set URI is deferred', () {
+    final now = DateTime(2026, 6, 16, 14, 1, 37, 900);
+    expect(
+      coolCastShouldDeferDlnaStopAfterSetUriForTest(
+        lastSetUriAt: now.subtract(const Duration(milliseconds: 200)),
+        now: now,
+        currentUrl: '',
+        pendingUrl: 'http://192.168.3.172:8197/push-video-item-1000016146',
+      ),
+      isTrue,
+    );
+    expect(
+      coolCastShouldDeferDlnaStopAfterSetUriForTest(
+        lastSetUriAt: now.subtract(const Duration(seconds: 4)),
+        now: now,
+        currentUrl: '',
+        pendingUrl: 'http://192.168.3.172:8197/push-video-item-1000016146',
+      ),
+      isFalse,
+    );
+    expect(
+      coolCastShouldDeferDlnaStopAfterSetUriForTest(
+        lastSetUriAt: now.subtract(const Duration(milliseconds: 200)),
+        now: now,
+        currentUrl: 'http://example.com/other.mp4',
+        pendingUrl: 'http://192.168.3.172:8197/push-video-item-1000016146',
+      ),
+      isFalse,
+    );
+  });
+
+  test('image cache failure reporting ignores stale requests', () {
     expect(
       coolCastShouldReportImageLoadFailureForTest(
         requestId: 3,
@@ -287,6 +359,12 @@ void main() {
       if (call.method == 'duration') {
         return Future<Object?>.value(98 * 1000);
       }
+      if (call.method == 'videoSize') {
+        return Future<Object?>.value({'width': 1920, 'height': 1080});
+      }
+      if (call.method == 'videoBitrate') {
+        return Future<Object?>.value(500000);
+      }
       return null;
     });
     addTearDown(() {
@@ -315,12 +393,34 @@ void main() {
         const Duration(seconds: 12));
     expect(await coolCastNativePlayerDurationForTest(),
         const Duration(seconds: 98));
+    expect(
+        await coolCastNativePlayerVideoSizeForTest(), const Size(1920, 1080));
+    expect(await coolCastNativePlayerVideoBitrateForTest(), 500000);
   });
 
   test('playing page can render native Android video surface', () {
     final widget = coolCastNativeVideoSurfaceForTest();
 
     expect(widget.viewType, 'coolcast/native_player');
+  });
+
+  test('DLNA position response reports current video progress and URI', () {
+    final response = coolCastPositionInfoResponseForTest(
+      position: const Duration(seconds: 7),
+      duration: const Duration(seconds: 98),
+      currentUrl: 'http://192.168.3.172:8197/push-video-item-1000016146',
+    );
+
+    expect(response, contains('<TrackDuration>00:01:38</TrackDuration>'));
+    expect(response, contains('<RelTime>00:00:07</RelTime>'));
+    expect(response, contains('<AbsTime>00:00:07</AbsTime>'));
+    expect(
+      response,
+      contains(
+        '<TrackURI>http://192.168.3.172:8197/'
+        'push-video-item-1000016146</TrackURI>',
+      ),
+    );
   });
 
   test('DLNA description exposes required renderer services', () {
@@ -495,7 +595,8 @@ void main() {
 <DIDL-Lite>
   <item>
     <dc:title>测试视频 &amp; 片段</dc:title>
-    <res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01">
+    <res protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01"
+         resolution="1920x1080" bitrate="1000000">
       http://example.com/video.mp4
     </res>
   </item>
@@ -504,6 +605,8 @@ void main() {
 
     expect(info.title, '测试视频 & 片段');
     expect(info.mimeType, 'video/mp4');
+    expect(info.resolution, '1920x1080');
+    expect(info.bitrate, 1000000);
     expect(info.isImage, isFalse);
   });
 
@@ -522,6 +625,41 @@ void main() {
     expect(info.title, '测试图片');
     expect(info.mimeType, 'image/jpeg');
     expect(info.isImage, isTrue);
+  });
+
+  test('duplicate DLNA SetURI for the active URL should not reload player', () {
+    const url = 'http://192.168.3.172:8197/push-video-item-1000016146';
+
+    expect(
+      coolCastShouldReloadDlnaSetUriForTest(
+        incomingUrl: url,
+        currentUrl: url,
+        pendingUrl: url,
+        isLoadingUrl: false,
+        hasActivePlayer: true,
+      ),
+      isFalse,
+    );
+    expect(
+      coolCastShouldReloadDlnaSetUriForTest(
+        incomingUrl: url,
+        currentUrl: '',
+        pendingUrl: url,
+        isLoadingUrl: true,
+        hasActivePlayer: false,
+      ),
+      isFalse,
+    );
+    expect(
+      coolCastShouldReloadDlnaSetUriForTest(
+        incomingUrl: 'http://192.168.3.172:8197/push-video-item-1000016147',
+        currentUrl: url,
+        pendingUrl: url,
+        isLoadingUrl: false,
+        hasActivePlayer: true,
+      ),
+      isTrue,
+    );
   });
 
   test('image metadata identifies extensionless push URLs', () {
@@ -555,6 +693,21 @@ void main() {
     expect(chips, contains('MP4'));
     expect(chips, contains('播放中'));
     expect(chips, isNot(contains('4K HDR')));
+  });
+
+  test('media chips use DLNA resolution and bitrate metadata', () {
+    final chips = coolCastMediaChipsForTest(
+      currentUrl: 'http://example.com/video',
+      mimeType: 'video/mp4',
+      state: PlaybackState.playing,
+      metadataResolution: '1920x1080',
+      metadataBitrate: 1000000,
+    );
+
+    expect(chips, contains('1080p'));
+    expect(chips, contains('MP4'));
+    expect(chips, contains('8.0 Mbps'));
+    expect(chips, contains('播放中'));
   });
 
   test('media chips show Bilibili qn separately from decoded resolution', () {
@@ -1427,6 +1580,42 @@ ST: ssdp:all
     expect(fallbackUri!.queryParameters['qn'], '80');
   });
 
+  test('debug summaries redact playback credentials and signed URLs', () {
+    const token = 'mobile-token-1';
+    final url = coolCastSafeUrlForLogForTest(
+      'https://api.bilibili.com/x/player/playurl?cid=2&access_key=$token&sign=abc123',
+    );
+    final body = coolCastSafeTextForLogForTest(
+      '{"accessKey":"$token","url":"https://example.com/a?access_key=$token"}',
+    );
+
+    expect(url, contains('api.bilibili.com/x/player/playurl'));
+    expect(url, isNot(contains(token)));
+    expect(url, isNot(contains('abc123')));
+    expect(body, isNot(contains(token)));
+    expect(body, contains('<redacted>'));
+  });
+
+  test('bounded UTF-8 reader rejects oversized control bodies', () async {
+    expect(
+      coolCastReadUtf8WithLimitForTest(
+        Stream<List<int>>.fromIterable([
+          utf8.encode('1234'),
+          utf8.encode('56'),
+        ]),
+        maxBytes: 5,
+      ),
+      throwsA(isA<FormatException>()),
+    );
+    expect(
+      await coolCastReadUtf8WithLimitForTest(
+        Stream<List<int>>.value(utf8.encode('12345')),
+        maxBytes: 5,
+      ),
+      '12345',
+    );
+  });
+
   test('Bilibili playurl response extracts durl URL', () {
     final response = jsonEncode({
       'code': 0,
@@ -1532,5 +1721,157 @@ ST: ssdp:all
     expect(find.textContaining('HTTP 地址不可用'), findsNothing);
     expect(find.textContaining('播放失败：Source error'), findsOneWidget);
     expect(find.textContaining('服务启动失败：port busy'), findsOneWidget);
+  });
+
+  testWidgets('bottom-left remote install button opens QR dialog and closes on back',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1920, 1080));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(const CoolCastApp());
+
+    final entryButton = find.byKey(const ValueKey('remote-install-entry-button'));
+    expect(entryButton, findsOneWidget);
+    expect(find.text('远程安装'), findsOneWidget);
+    expect(find.byKey(const ValueKey('remote-install-dialog')), findsNothing);
+
+    await tester.tap(entryButton);
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('remote-install-dialog')), findsOneWidget);
+    expect(find.text('远程安装应用'), findsOneWidget);
+    expect(find.byKey(const ValueKey('remote-install-qr-code')), findsOneWidget);
+    expect(find.text('http://TV-IP:7788/install'), findsOneWidget);
+    expect(find.text('等待手机扫码上传 APK 安装包'), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('remote-install-dialog')), findsNothing);
+  });
+
+  testWidgets('pressing remote arrow down on home screen opens remote install dialog',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1920, 1080));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(const CoolCastApp());
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('remote-install-dialog')), findsNothing);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('remote-install-dialog')), findsOneWidget);
+    expect(find.byKey(const ValueKey('remote-install-qr-code')), findsOneWidget);
+  });
+
+  test('CoolCastQrCode generates valid ISO 18004 matrix for install URL', () {
+    final qr = CoolCastQrCode.fromText('http://192.168.1.114:7788/install');
+
+    expect(qr.version, 3);
+    expect(qr.size, 29);
+    // Top-left, top-right, and bottom-left finder centers must be dark.
+    expect(qr.isDark(3, 3), isTrue);
+    expect(qr.isDark(3, qr.size - 4), isTrue);
+    expect(qr.isDark(qr.size - 4, 3), isTrue);
+    // Dark module at (4 * version + 9, 8) must be dark.
+    expect(qr.isDark(4 * qr.version + 9, 8), isTrue);
+  });
+
+  test('remote install HTML pages render upload form and status feedback', () {
+    final form = coolCastInstallHtmlFormForTest(
+      receiverName: '客厅电视',
+      ipAddress: '192.168.1.18',
+      statusMessage: '等待手机扫码上传 APK 安装包',
+    );
+    final success = coolCastInstallUploadHtmlResponseForTest(
+      fileName: 'demo.apk',
+      isAccepted: true,
+      detail: '安装包已上传至 CoolCast，电视端正在自动拉起安装界面。',
+    );
+    final failure = coolCastInstallUploadHtmlResponseForTest(
+      fileName: '',
+      isAccepted: false,
+      detail: '未检测到有效的 .apk 安装包，请重新选择文件上传。',
+    );
+
+    expect(form, contains('远程安装到 客厅电视'));
+    expect(form, contains('action="/install/upload"'));
+    expect(form, contains('accept=".apk,application/vnd.android.package-archive"'));
+    expect(success, contains('APK 上传成功，正在安装'));
+    expect(success, contains('文件：demo.apk'));
+    expect(failure, contains('APK 上传失败'));
+  });
+
+  test('APK upload parser extracts valid APK from multipart and raw bodies', () {
+    final fakeApkBytes = Uint8List.fromList([0x50, 0x4B, 0x03, 0x04, 1, 2, 3, 4]);
+    const boundary = '----CoolCastBoundary12345';
+    final multipartHeader = utf8.encode(
+      '--$boundary\r\n'
+      'Content-Disposition: form-data; name="apk"; filename="tv_helper.apk"\r\n'
+      'Content-Type: application/vnd.android.package-archive\r\n\r\n',
+    );
+    final multipartFooter = utf8.encode('\r\n--$boundary--\r\n');
+    final multipartBody = Uint8List.fromList([
+      ...multipartHeader,
+      ...fakeApkBytes,
+      ...multipartFooter,
+    ]);
+
+    final parsedMultipart = coolCastExtractUploadedApkForTest(
+      multipartBody,
+      contentTypeHeader: 'multipart/form-data; boundary=$boundary',
+    );
+    expect(parsedMultipart, isNotNull);
+    expect(parsedMultipart!['fileName'], 'tv_helper.apk');
+    expect(parsedMultipart['bytes'], fakeApkBytes);
+
+    final parsedRaw = coolCastExtractUploadedApkForTest(
+      fakeApkBytes,
+      contentTypeHeader: 'application/vnd.android.package-archive',
+      queryFileName: 'kodi_arm64.apk',
+    );
+    expect(parsedRaw, isNotNull);
+    expect(parsedRaw!['fileName'], 'kodi_arm64.apk');
+    expect(parsedRaw['bytes'], fakeApkBytes);
+
+    final rejectedTxt = coolCastExtractUploadedApkForTest(
+      fakeApkBytes,
+      contentTypeHeader: 'application/octet-stream',
+      queryFileName: 'notes.txt',
+    );
+    expect(rejectedTxt, isNull);
+
+    final rejectedMagic = coolCastExtractUploadedApkForTest(
+      Uint8List.fromList([0x00, 0x01, 0x02, 0x03]),
+      contentTypeHeader: 'application/vnd.android.package-archive',
+      queryFileName: 'broken.apk',
+    );
+    expect(rejectedMagic, isNull);
+  });
+
+  test('app installer channel sends filePath to Android native bridge', () async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(coolCastAppInstallerChannelForTest, (call) {
+      calls.add(call);
+      if (call.method == 'installApk') {
+        return Future<Object?>.value('launched');
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(coolCastAppInstallerChannelForTest, null);
+    });
+
+    final status = await coolCastInstallApkForTest('/tmp/coolcast_apk/demo.apk');
+
+    expect(status, 'launched');
+    expect(calls, hasLength(1));
+    expect(calls.single.method, 'installApk');
+    expect(calls.single.arguments, {'filePath': '/tmp/coolcast_apk/demo.apk'});
   });
 }

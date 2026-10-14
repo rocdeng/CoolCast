@@ -1,3 +1,8 @@
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - .gradle-home/**
 include: package:flutter_lints/flutter.yaml
 
 linter:
